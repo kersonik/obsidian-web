@@ -2,15 +2,16 @@
 
 > A lightweight, zero-dependency, self-hosted PHP & JavaScript web interface for viewing, editing, and managing your [Obsidian](https://obsidian.md/) vault across desktop and mobile devices.
 
-![Obsidian Web Interface](https://img.shields.io/badge/PHP-7.4%2B-777BB4?style=for-the-badge&logo=php&logoColor=white)
-![Obsidian Theme](https://img.shields.io/badge/Theme-Obsidian%20Dark-7F6DF2?style=for-the-badge)
-![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Vanilla%20JS%2FPHP)-success?style=for-the-badge)
+[![PHP Version](https://img.shields.io/badge/PHP-7.4%2B-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://www.php.net/)
+[![Theme](https://img.shields.io/badge/Theme-Obsidian%20Dark-7F6DF2?style=for-the-badge&logo=obsidian&logoColor=white)](https://obsidian.md/)
+[![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Vanilla%20JS%2FPHP)-success?style=for-the-badge)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
+[![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 ---
 
 ## ✨ Features
 
-- **📱 Authentic Obsidian Mobile Aesthetics**: Pitch-black (`#000000`) OLED dark theme matching native Obsidian mobile & desktop apps.
+- **📱 Authentic Obsidian Aesthetics**: Pitch-black (`#000000`) OLED dark theme matching native Obsidian mobile & desktop applications.
 - **🔐 Dual-Mode Authentication System**:
   - **Read-Only Mode**: Safe view mode for browsing notes without edit permissions.
   - **Edit Mode**: Full vault access to create, edit, rename, move, and delete files & folders.
@@ -32,6 +33,38 @@
 
 ---
 
+## 🏗️ System Architecture
+
+```mermaid
+graph TD
+    subgraph Client["Client Browser (Mobile & Desktop)"]
+        UI["Obsidian OLED Dark UI (index.php)"]
+        JS["Markdown Parser & Tree Manager (app.js)"]
+        UI --- JS
+    end
+
+    subgraph Server["Web Server (PHP 7.4+)"]
+        Auth["Authentication & Rate Limiter (login.php)"]
+        API["RESTful Filesystem Controller (file.php)"]
+        Rate["Lockout State (ip_attempts.json)"]
+        Auth --- Rate
+    end
+
+    subgraph Storage["Filesystem Storage"]
+        Vault[("vault/ Root Directory")]
+        Notes["Markdown Files (*.md)"]
+        Media["Attachments (Images, Audio, Video)"]
+        Vault --- Notes
+        Vault --- Media
+    end
+
+    JS -->|"AJAX / Fetch API"| API
+    UI -->|"POST Credentials"| Auth
+    API -->|"Canonical realpath() Check"| Vault
+```
+
+---
+
 ## 🔒 Security & Password Configuration
 
 > [!IMPORTANT]
@@ -40,7 +73,7 @@
 
 To generate a custom password hash for your vault, run the following PHP snippet:
 ```bash
-php -r "echo password_hash('YOUR_NEW_PASSWORD', PASSWORD_BCRYPT);"
+php -r "echo password_hash('YOUR_NEW_PASSWORD', PASSWORD_BCRYPT) . PHP_EOL;"
 ```
 
 Then update `login.php`:
@@ -61,14 +94,14 @@ $edit_hash     = password_hash('YOUR_EDIT_PASSWORD', PASSWORD_BCRYPT);
 ## 🚀 Installation & Setup
 
 ### Requirements
-- **Web Server**: Apache, Nginx, LiteSpeed, or Caddy.
+- **Web Server**: Apache, Nginx, LiteSpeed, Caddy, or PHP Built-in Server.
 - **PHP**: PHP 7.4 or PHP 8.x with `json` and standard file system extensions enabled.
 - **Database**: None required (uses standard server filesystem).
 
-### Quick Start
-1. Clone or copy the repository files to your web server document root (e.g. `/var/www/html/` or subfolder):
+### Quick Start (Production Server)
+1. Clone the repository into your web server document root:
    ```bash
-   git clone https://github.com/kersonik/obsidian-web.git
+   git clone git@github.com:kersonik/obsidian-web.git
    cd obsidian-web
    ```
 
@@ -79,6 +112,14 @@ $edit_hash     = password_hash('YOUR_EDIT_PASSWORD', PASSWORD_BCRYPT);
    ```
 
 3. Open your web browser and navigate to `http://your-domain.com/login.php`.
+
+### Local Development / Quick Test
+You can start a temporary local server in seconds without installing Apache or Nginx:
+
+```bash
+php -S 0.0.0.0:8000
+```
+Then navigate to `http://localhost:8000/login.php` in your browser.
 
 ---
 
@@ -116,9 +157,11 @@ obsidian-web/
 
 ## ⌨️ Keyboard Shortcuts
 
-- `Ctrl + S` / `Cmd + S`: Instantly save current note to server.
-- `Escape`: Close active custom modal dialog.
-- `Enter`: Confirm action in custom modal dialog.
+| Shortcut | Action |
+| :--- | :--- |
+| `Ctrl + S` / `Cmd + S` | Instantly save current note to server |
+| `Escape` | Close active custom modal dialog |
+| `Enter` | Confirm action in custom modal dialog |
 
 ---
 
