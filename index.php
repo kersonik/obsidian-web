@@ -14,6 +14,12 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Obsidian Viewer</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <style>
         * {
             box-sizing: border-box;
@@ -740,7 +746,263 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
             background-color: #6b59e6;
         }
 
+        /* Header icon button */
+        .header-icon-btn {
+            background-color: #1a1a1e;
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            transition: all 0.15s;
+        }
+        .header-icon-btn:hover {
+            background-color: var(--bg-hover);
+            border-color: var(--accent-color);
+            color: #fff;
+        }
+
+        /* Mobile Bottom Bar (Obsidian Mobile Ribbon) */
+        .mobile-bottom-bar {
+            display: none;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 56px;
+            background-color: rgba(13, 13, 14, 0.95);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-top: 1px solid var(--border-color);
+            z-index: 150;
+            align-items: center;
+            justify-content: space-around;
+            padding: 0 4px;
+            padding-bottom: env(safe-area-inset-bottom, 0px);
+        }
+        .mobile-nav-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 3px;
+            font-size: 0.68rem;
+            font-weight: 500;
+            padding: 6px 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.15s;
+            flex: 1;
+            max-width: 72px;
+        }
+        .mobile-nav-btn svg {
+            transition: transform 0.15s;
+        }
+        .mobile-nav-btn:active {
+            transform: scale(0.92);
+        }
+        .mobile-nav-btn:hover, .mobile-nav-btn.active {
+            color: var(--accent-color);
+        }
+        .mobile-nav-btn.active-accent {
+            color: #fff;
+            background: rgba(127, 109, 242, 0.15);
+        }
+
+        /* Obsidian Interactive Graph View Modal */
+        .graph-modal-backdrop {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .graph-modal-content {
+            width: 95vw;
+            height: 90vh;
+            max-width: 1400px;
+            background-color: #0b0b0d;
+            border: 1px solid #28282e;
+            border-radius: 14px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.9);
+            position: relative;
+        }
+        .graph-modal-header {
+            height: 54px;
+            background-color: #121215;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 18px;
+            flex-shrink: 0;
+            gap: 12px;
+        }
+        .graph-title-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .graph-title-group h3 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #fff;
+        }
+        .graph-badge {
+            background-color: rgba(127, 109, 242, 0.2);
+            color: #a882ff;
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 10px;
+            border: 1px solid rgba(127, 109, 242, 0.3);
+        }
+        .graph-header-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .graph-search-input {
+            background-color: #1a1a1e;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: #fff;
+            padding: 6px 10px;
+            font-size: 0.82rem;
+            outline: none;
+            width: 160px;
+            transition: border-color 0.2s, width 0.2s;
+        }
+        .graph-search-input:focus {
+            border-color: var(--accent-color);
+            width: 200px;
+        }
+        .graph-ctrl-btn {
+            background-color: #1a1a1e;
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 500;
+            transition: all 0.15s;
+        }
+        .graph-ctrl-btn:hover {
+            background-color: #28282e;
+            color: #fff;
+        }
+        .graph-close-btn {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 1.2rem;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 6px;
+            transition: all 0.15s;
+            line-height: 1;
+        }
+        .graph-close-btn:hover {
+            color: #fff;
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        .graph-canvas-container {
+            flex: 1;
+            position: relative;
+            background-color: #070708;
+            overflow: hidden;
+            cursor: grab;
+        }
+        .graph-canvas-container:active {
+            cursor: grabbing;
+        }
+        #graph-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .graph-legend {
+            position: absolute;
+            bottom: 14px;
+            left: 18px;
+            background-color: rgba(18, 18, 21, 0.85);
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 6px 12px;
+            display: flex;
+            gap: 12px;
+            font-size: 0.72rem;
+            color: var(--text-secondary);
+            pointer-events: none;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .legend-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .legend-dot.active { background-color: #ffd700; box-shadow: 0 0 6px #ffd700; }
+        .legend-dot.normal { background-color: #7f6df2; }
+        .legend-dot.unresolved { background-color: #55555e; }
+
+        /* SVG and Tool Select */
+        .svg-inline-container, .svg-container {
+            display: inline-block;
+            max-width: 100%;
+            margin: 16px 0;
+            overflow-x: auto;
+            text-align: center;
+        }
+        .svg-inline-container svg, .svg-container svg {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+        }
+        .tool-select {
+            background-color: #161619;
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            border-radius: 4px;
+            font-size: 0.75rem;
+            padding: 4px 6px;
+            cursor: pointer;
+            outline: none;
+        }
+        .tool-select:hover, .tool-select:focus {
+            border-color: var(--accent-color);
+            color: #fff;
+        }
+
         @media (max-width: 768px) {
+            .mobile-bottom-bar {
+                display: flex;
+            }
+            .app-container {
+                height: calc(100vh - var(--header-height) - 56px);
+            }
             .sidebar {
                 position: absolute;
                 top: 0;
@@ -759,8 +1021,406 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
             }
 
             .note-scroll-area {
-                padding: 24px 16px;
+                padding: 18px 14px 40px 14px;
             }
+
+            .editor-toolbar {
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+                white-space: nowrap;
+                padding: 8px 12px;
+                gap: 8px;
+            }
+            .editor-toolbar::-webkit-scrollbar {
+                height: 3px;
+            }
+            .tool-btn {
+                padding: 6px 10px;
+                font-size: 0.82rem;
+                flex-shrink: 0;
+            }
+
+            .graph-modal-content {
+                width: 100vw;
+                height: 100vh;
+                border-radius: 0;
+                border: none;
+            }
+            .graph-search-input {
+                width: 100px;
+            }
+            .graph-search-input:focus {
+                width: 120px;
+            }
+            .graph-legend {
+                display: none;
+            }
+            .logout-btn {
+                padding: 4px 8px;
+                font-size: 0.78rem;
+            }
+        }
+        /* === Obsidian Callouts/Admonitions === */
+        .callout {
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin: 16px 0;
+            border-left: 4px solid;
+            background-color: rgba(255,255,255,0.03);
+        }
+        .callout-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            margin-bottom: 6px;
+        }
+        .callout-title-icon {
+            font-size: 1.1rem;
+            line-height: 1;
+        }
+        .callout-content {
+            font-size: 0.92rem;
+            line-height: 1.6;
+            color: var(--text-primary);
+        }
+        .callout-content p { margin-bottom: 8px; }
+        .callout-content p:last-child { margin-bottom: 0; }
+
+        .callout-note { border-color: #448aff; background-color: rgba(68,138,255,0.06); }
+        .callout-note .callout-title { color: #448aff; }
+        .callout-info { border-color: #448aff; background-color: rgba(68,138,255,0.06); }
+        .callout-info .callout-title { color: #448aff; }
+        .callout-tip { border-color: #00bfa5; background-color: rgba(0,191,165,0.06); }
+        .callout-tip .callout-title { color: #00bfa5; }
+        .callout-important { border-color: #ab47bc; background-color: rgba(171,71,188,0.06); }
+        .callout-important .callout-title { color: #ab47bc; }
+        .callout-warning { border-color: #ff9100; background-color: rgba(255,145,0,0.06); }
+        .callout-warning .callout-title { color: #ff9100; }
+        .callout-caution { border-color: #ff5252; background-color: rgba(255,82,82,0.06); }
+        .callout-caution .callout-title { color: #ff5252; }
+        .callout-danger { border-color: #ff5252; background-color: rgba(255,82,82,0.06); }
+        .callout-danger .callout-title { color: #ff5252; }
+        .callout-bug { border-color: #ff5252; background-color: rgba(255,82,82,0.06); }
+        .callout-bug .callout-title { color: #ff5252; }
+        .callout-example { border-color: #7c4dff; background-color: rgba(124,77,255,0.06); }
+        .callout-example .callout-title { color: #7c4dff; }
+        .callout-quote { border-color: #9e9e9e; background-color: rgba(158,158,158,0.06); }
+        .callout-quote .callout-title { color: #9e9e9e; }
+        .callout-question { border-color: #ff9100; background-color: rgba(255,145,0,0.06); }
+        .callout-question .callout-title { color: #ff9100; }
+        .callout-success { border-color: #00c853; background-color: rgba(0,200,83,0.06); }
+        .callout-success .callout-title { color: #00c853; }
+        .callout-failure { border-color: #ff5252; background-color: rgba(255,82,82,0.06); }
+        .callout-failure .callout-title { color: #ff5252; }
+        .callout-abstract { border-color: #00b0ff; background-color: rgba(0,176,255,0.06); }
+        .callout-abstract .callout-title { color: #00b0ff; }
+        .callout-todo { border-color: #448aff; background-color: rgba(68,138,255,0.06); }
+        .callout-todo .callout-title { color: #448aff; }
+
+        /* === Code Blocks === */
+        .code-block-wrapper {
+            position: relative;
+            margin: 16px 0;
+        }
+        .code-block-wrapper .code-lang-label {
+            position: absolute;
+            top: 0;
+            right: 0;
+            background-color: #1e1e22;
+            color: #8e8e93;
+            font-size: 0.72rem;
+            padding: 4px 10px;
+            border-radius: 0 8px 0 6px;
+            border-bottom: 1px solid var(--border-color);
+            border-left: 1px solid var(--border-color);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 600;
+        }
+        .code-block-wrapper .code-copy-btn {
+            position: absolute;
+            top: 6px;
+            right: 70px;
+            background-color: #222226;
+            color: #8e8e93;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 3px 8px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+        .code-block-wrapper:hover .code-copy-btn {
+            opacity: 1;
+        }
+        .code-block-wrapper .code-copy-btn:hover {
+            background-color: #333;
+            color: #fff;
+        }
+        .markdown-rendered pre code {
+            background: none;
+            padding: 0;
+            border-radius: 0;
+            font-size: 0.88em;
+            color: #d4d4d4;
+        }
+
+        /* === Mermaid Diagrams === */
+        .mermaid-container {
+            background-color: #1a1a1e;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            margin: 16px 0;
+            overflow-x: auto;
+            text-align: center;
+        }
+        .mermaid-container svg {
+            max-width: 100%;
+            height: auto;
+        }
+
+        /* === Highlight / Mark === */
+        .markdown-rendered mark, .obsidian-highlight {
+            background-color: rgba(255, 208, 0, 0.25);
+            color: inherit;
+            padding: 1px 4px;
+            border-radius: 3px;
+        }
+
+        /* === Tags === */
+        .obsidian-tag {
+            display: inline-block;
+            background-color: rgba(127, 109, 242, 0.12);
+            color: #7f6df2;
+            padding: 1px 8px;
+            border-radius: 10px;
+            font-size: 0.85em;
+            font-weight: 500;
+            text-decoration: none;
+            border: 1px solid rgba(127, 109, 242, 0.25);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .obsidian-tag:hover {
+            background-color: rgba(127, 109, 242, 0.25);
+            border-color: rgba(127, 109, 242, 0.5);
+        }
+
+        /* === Checkboxes / Task Lists === */
+        .task-list {
+            list-style: none;
+            margin-left: 0;
+            padding-left: 0;
+        }
+        .task-list-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 6px;
+            padding: 4px 0;
+        }
+        .task-list-item input[type="checkbox"] {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            min-width: 18px;
+            border: 2px solid #555;
+            border-radius: 4px;
+            background-color: transparent;
+            cursor: pointer;
+            margin-top: 2px;
+            position: relative;
+            transition: all 0.15s;
+        }
+        .task-list-item input[type="checkbox"]:checked {
+            background-color: #7f6df2;
+            border-color: #7f6df2;
+        }
+        .task-list-item input[type="checkbox"]:checked::after {
+            content: '\2713';
+            position: absolute;
+            top: -1px;
+            left: 2px;
+            color: #fff;
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .task-list-item.completed > .task-text {
+            text-decoration: line-through;
+            color: var(--text-secondary);
+            opacity: 0.7;
+        }
+
+        /* === Tables === */
+        .markdown-rendered table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 0.92rem;
+        }
+        .markdown-rendered th {
+            background-color: #1a1a1e;
+            color: var(--text-heading);
+            font-weight: 600;
+            padding: 10px 14px;
+            text-align: left;
+            border: 1px solid #2a2a30;
+        }
+        .markdown-rendered td {
+            padding: 8px 14px;
+            border: 1px solid #2a2a30;
+            color: var(--text-primary);
+        }
+        .markdown-rendered tr:nth-child(even) {
+            background-color: rgba(255,255,255,0.02);
+        }
+        .markdown-rendered tr:hover {
+            background-color: rgba(127, 109, 242, 0.05);
+        }
+
+        /* === Blockquotes === */
+        .markdown-rendered blockquote {
+            border-left: 3px solid #7f6df2;
+            margin: 16px 0;
+            padding: 8px 16px;
+            color: var(--text-secondary);
+            background-color: rgba(127, 109, 242, 0.04);
+            border-radius: 0 6px 6px 0;
+        }
+        .markdown-rendered blockquote p {
+            margin-bottom: 6px;
+        }
+        .markdown-rendered blockquote p:last-child {
+            margin-bottom: 0;
+        }
+
+        /* === Strikethrough === */
+        .markdown-rendered del, .markdown-rendered s {
+            color: var(--text-secondary);
+            opacity: 0.7;
+        }
+
+        /* === Internal Wiki Links === */
+        .obsidian-wikilink {
+            color: #7f6df2;
+            text-decoration: none;
+            border-bottom: 1px solid rgba(127, 109, 242, 0.3);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .obsidian-wikilink:hover {
+            color: #a594ff;
+            border-bottom-color: #a594ff;
+        }
+        .obsidian-wikilink.unresolved {
+            color: #8e8e93;
+            border-bottom-style: dashed;
+        }
+
+        /* === Headings h4-h6 === */
+        .markdown-rendered h4 {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: var(--text-heading);
+            margin-top: 20px;
+            margin-bottom: 10px;
+        }
+        .markdown-rendered h5 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--text-heading);
+            margin-top: 18px;
+            margin-bottom: 8px;
+        }
+        .markdown-rendered h6 {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-top: 16px;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        /* === Footnotes === */
+        .footnote-ref {
+            color: #7f6df2;
+            font-size: 0.8em;
+            vertical-align: super;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        .footnotes-section {
+            border-top: 1px solid var(--border-hr);
+            margin-top: 32px;
+            padding-top: 16px;
+            font-size: 0.88rem;
+            color: var(--text-secondary);
+        }
+        .footnote-item {
+            margin-bottom: 8px;
+        }
+
+        /* === KaTeX Math === */
+        .math-block {
+            overflow-x: auto;
+            padding: 12px 0;
+            margin: 16px 0;
+            text-align: center;
+        }
+        .math-inline {
+            display: inline;
+        }
+
+        /* === Keyboard Shortcut === */
+        .markdown-rendered kbd {
+            background-color: #1a1a1e;
+            border: 1px solid #333;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 0.85em;
+            font-family: SFMono-Regular, Consolas, monospace;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.3);
+        }
+
+        /* === Embedded Note Transclusion === */
+        .embedded-note {
+            background-color: rgba(127, 109, 242, 0.04);
+            border: 1px solid rgba(127, 109, 242, 0.15);
+            border-radius: 8px;
+            padding: 16px;
+            margin: 16px 0;
+        }
+        .embedded-note-title {
+            color: #7f6df2;
+            font-weight: 600;
+            font-size: 0.9rem;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        /* === Nested Lists === */
+        .markdown-rendered ul ul, .markdown-rendered ol ol,
+        .markdown-rendered ul ol, .markdown-rendered ol ul {
+            margin-bottom: 0;
+            margin-top: 4px;
+        }
+
+        /* === Font color inline HTML support === */
+        .markdown-rendered font[color] {
+            /* inherits color from attribute */
+        }
+
+        /* === Comment / Hidden text === */
+        .obsidian-comment {
+            display: none;
         }
     </style>
 </head>
@@ -789,6 +1449,10 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
             </span>
         </div>
         <div class="header-right">
+            <button id="btn-open-graph" class="header-icon-btn" title="Otevřít graf poznámek (Graph View)">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+                <span>Graf</span>
+            </button>
             <a href="login.php?logout=1" class="logout-btn">Odhlásit se</a>
         </div>
     </header>
@@ -849,13 +1513,29 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
                     <button class="tool-btn" data-tool="italic" title="Kurzíva (*text*)"><i>I</i></button>
                     <button class="tool-btn" data-tool="h1" title="Nadpis 1">H1</button>
                     <button class="tool-btn" data-tool="h2" title="Nadpis 2">H2</button>
+                    <button class="tool-btn" data-tool="highlight" title="Zvýraznění (==text==)"><mark style="background: rgba(255,208,0,0.3); color: inherit; padding: 0 2px;">H</mark></button>
+                    <button class="tool-btn" data-tool="strike" title="Přeškrtnutí (~~text~~)"><s>S</s></button>
+                    <button class="tool-btn" data-tool="wikilink" title="Odkaz na poznámku ([[link]])">🔗 [[ ]]</button>
+                    <button class="tool-btn" data-tool="callout" title="Vložit callout">💡 Callout</button>
+                    <button class="tool-btn" data-tool="table" title="Vložit tabulku">📊 Tabulka</button>
                     <button class="tool-btn" data-tool="hr" title="Dělící čára (---)">—</button>
                     <button class="tool-btn" data-tool="task" title="Úkol (- [ ])">☑</button>
 
+                    <!-- Text Color Picker -->
+                    <select id="tool-color-select" class="tool-select" title="Barva vybraného textu">
+                        <option value="">🎨 Barva textu...</option>
+                        <option value="#ff5555">🔴 Červená</option>
+                        <option value="#50fa7b">🟢 Zelená</option>
+                        <option value="#8be9fd">🔵 Azurová</option>
+                        <option value="#bd93f9">🟣 Fialová</option>
+                        <option value="#ffb86c">🟠 Oranžová</option>
+                        <option value="#f1fa8c">🟡 Žlutá</option>
+                    </select>
+
                     <!-- Native File Explorer Pickers -->
-                    <button id="btn-upload-image" class="tool-btn" title="Vložit obrázek z počítače">🖼️ Vložit obrázek</button>
-                    <button id="btn-upload-audio" class="tool-btn" title="Vložit zvuk z počítače">🎵 Vložit zvuk</button>
-                    <button id="btn-upload-file" class="tool-btn" title="Nahrát libovolný soubor z počítače">📁 Nahrát soubor</button>
+                    <button id="btn-upload-image" class="tool-btn" title="Vložit obrázek z počítače">🖼️ Obrázek</button>
+                    <button id="btn-upload-audio" class="tool-btn" title="Vložit zvuk z počítače">🎵 Zvuk</button>
+                    <button id="btn-upload-file" class="tool-btn" title="Nahrát libovolný soubor z počítače">📁 Soubor</button>
 
                     <!-- Hidden Native File Inputs -->
                     <input type="file" id="input-file-image" accept="image/*" style="display: none;">
@@ -880,6 +1560,58 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
                 <textarea id="note-editor" class="editor-textarea" style="display: none;" spellcheck="false" placeholder="Zde můžete psát obsah poznámky v Markdownu..."></textarea>
             </div>
         </main>
+    </div>
+
+    <!-- Mobile Bottom Navigation Bar (Obsidian Mobile Ribbon) -->
+    <nav class="mobile-bottom-bar" id="mobile-bottom-bar">
+        <button class="mobile-nav-btn" id="m-btn-files" title="Soubory">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+            <span>Soubory</span>
+        </button>
+        <button class="mobile-nav-btn" id="m-btn-search" title="Hledat">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <span>Hledat</span>
+        </button>
+        <button class="mobile-nav-btn" id="m-btn-graph" title="Graf pohledu">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+            <span>Graf</span>
+        </button>
+        <button class="mobile-nav-btn" id="m-btn-mode" title="Přepnout režim">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+            <span>Režim</span>
+        </button>
+        <?php if ($userMode === 'edit'): ?>
+        <button class="mobile-nav-btn active-accent" id="m-btn-new-note" title="Nová poznámka">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            <span>Přidat</span>
+        </button>
+        <?php endif; ?>
+    </nav>
+
+    <!-- Obsidian Interactive Graph View Modal -->
+    <div id="graph-modal" class="graph-modal-backdrop" style="display: none;">
+        <div class="graph-modal-content">
+            <div class="graph-modal-header">
+                <div class="graph-title-group">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#7f6df2" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
+                    <h3>Graf poznámek (Graph View)</h3>
+                    <span id="graph-stats" class="graph-badge">0 poznámek</span>
+                </div>
+                <div class="graph-header-controls">
+                    <input type="text" id="graph-search" class="graph-search-input" placeholder="Hledat uzel...">
+                    <button id="graph-btn-fit" class="graph-ctrl-btn" title="Vystředit graf">🎯 Reset</button>
+                    <button id="graph-btn-close" class="graph-close-btn" title="Zavřít">✕</button>
+                </div>
+            </div>
+            <div class="graph-canvas-container" id="graph-container">
+                <canvas id="graph-canvas"></canvas>
+                <div class="graph-legend">
+                    <span class="legend-item"><span class="legend-dot active"></span> Aktivní poznámka</span>
+                    <span class="legend-item"><span class="legend-dot normal"></span> Poznámka</span>
+                    <span class="legend-item"><span class="legend-dot unresolved"></span> Neexistující odkaz</span>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Custom In-App Modal Dialog -->

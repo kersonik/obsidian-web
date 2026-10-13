@@ -512,7 +512,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 } else {
                     showPreviewView();
                 }
-            } else if (/\.(jpg|jpeg|png|gif|webp|svg)$/i.test(filePath)) {
+            } else if (/\.svg$/i.test(filePath)) {
+                hideEditorAndPreview();
+                const svgText = await response.text();
+                noteView.innerHTML = `<div class="svg-container" style="background: #111114; border: 1px solid var(--border-color); border-radius: 8px; padding: 24px; text-align: center; overflow: auto;">${svgText}</div>`;
+                noteView.style.display = 'block';
+                emptyState.style.display = 'none';
+            } else if (/\.(jpg|jpeg|png|gif|webp)$/i.test(filePath)) {
                 hideEditorAndPreview();
                 const imgUrl = `file.php?f=${encodeURIComponent(filePath)}`;
                 noteView.innerHTML = `<img src="${imgUrl}" alt="${escapeHtml(filePath)}" style="max-width: 100%; height: auto; border-radius: 8px;">`;
@@ -546,6 +552,38 @@ document.addEventListener('DOMContentLoaded', () => {
         if (btnSaveNote) btnSaveNote.style.display = 'none';
     }
 
+    function resolveNotePath(name) {
+        if (!name) return null;
+        let clean = name.trim().replace(/^\[\[/, '').replace(/\]\]$/, '');
+        if (!clean.toLowerCase().endsWith('.md')) clean += '.md';
+        const targetBase = clean.split('/').pop().toLowerCase();
+
+        function search(items) {
+            for (const item of items) {
+                if (item.type === 'file') {
+                    if (item.path.toLowerCase() === clean.toLowerCase() || item.name.toLowerCase() === targetBase) {
+                        return item.path;
+                    }
+                } else if (item.children) {
+                    const f = search(item.children);
+                    if (f) return f;
+                }
+            }
+            return null;
+        }
+        return search(allFilesData) || clean;
+    }
+
+    window.openWikilink = function(target) {
+        const fullPath = resolveNotePath(target);
+        if (fullPath) {
+            if (sidebar.classList.contains('open')) {
+                toggleSidebar();
+            }
+            selectFile(fullPath);
+        }
+    };
+
     function showPreviewView() {
         isEditingMode = false;
         if (btnToggleView) btnToggleView.classList.add('active');
@@ -560,6 +598,88 @@ document.addEventListener('DOMContentLoaded', () => {
         emptyState.style.display = 'none';
 
         if (btnSaveNote) btnSaveNote.style.display = 'none';
+
+        // Post-render: Interactive task list checkboxes (just like Obsidian!)
+        if (isEditAllowed) {
+            const taskCheckboxes = noteView.querySelectorAll('.task-list-item input[type="checkbox"]');
+            taskCheckboxes.forEach((cb, idx) => {
+                cb.removeAttribute('disabled');
+                cb.style.cursor = 'pointer';
+                cb.addEventListener('change', async (e) => {
+                    e.stopPropagation();
+                    const isChecked = cb.checked;
+                    const li = cb.closest('.task-list-item');
+                    if (li) {
+                        li.classList.toggle('completed', isChecked);
+                    }
+                    let matchIndex = 0;
+                    const taskRegex = /^([ \t]*[-*]\s+\[)([ xX])(\]\s+.*)$/gm;
+                    rawNoteContent = rawNoteContent.replace(taskRegex, (match, prefix, state, suffix) => {
+                        if (matchIndex === idx) {
+                            matchIndex++;
+                            return `${prefix}${isChecked ? 'x' : ' '}${suffix}`;
+                        }
+                        matchIndex++;
+                        return match;
+                    });
+                    if (noteEditor) noteEditor.value = rawNoteContent;
+                    await saveCurrentNote();
+                });
+            });
+        }
+
+        // Post-render: Syntax highlighting
+        if (typeof hljs !== 'undefined') {
+            noteView.querySelectorAll('pre code').forEach(block => {
+                hljs.highlightElement(block);
+            });
+        }
+
+        // Post-render: Mermaid diagrams
+        if (typeof mermaid !== 'undefined') {
+            try {
+                mermaid.run({ nodes: noteView.querySelectorAll('.mermaid') });
+            } catch (e) {
+                console.warn('Mermaid rendering error:', e);
+            }
+        }
+
+        // Post-render: KaTeX math
+        if (typeof katex !== 'undefined') {
+            noteView.querySelectorAll('[data-math-block]').forEach(el => {
+                try {
+                    katex.render(el.getAttribute('data-math-block'), el, { displayMode: true, throwOnError: false });
+                } catch (e) {
+                    el.textContent = el.getAttribute('data-math-block');
+                }
+            });
+            noteView.querySelectorAll('[data-math-inline]').forEach(el => {
+                try {
+                    katex.render(el.getAttribute('data-math-inline'), el, { displayMode: false, throwOnError: false });
+                } catch (e) {
+                    el.textContent = el.getAttribute('data-math-inline');
+                }
+            });
+        }
+
+        // Post-render: Transcluded Notes preview (![[Note]])
+        noteView.querySelectorAll('[data-embed-note]').forEach(async (el) => {
+            const embedTarget = el.getAttribute('data-embed-note');
+            const targetPath = resolveNotePath(embedTarget);
+            if (targetPath && targetPath !== currentFilePath) {
+                try {
+                    const resp = await fetch(`file.php?f=${encodeURIComponent(targetPath)}`);
+                    if (resp.ok) {
+                        const embedText = await resp.text();
+                        el.innerHTML = parseObsidianMarkdown(embedText, targetPath);
+                    } else {
+                        el.innerHTML = `<em style="color: var(--text-secondary);">Poznámka "${escapeHtml(embedTarget)}" nenalezena.</em>`;
+                    }
+                } catch (err) {
+                    el.innerHTML = `<em style="color: #eb5757;">Chyba načítání vložené poznámky.</em>`;
+                }
+            }
+        });
     }
 
     function showEditorView() {
@@ -772,6 +892,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 await insertFormatting(tool);
             });
         });
+
+        const toolColorSelect = document.getElementById('tool-color-select');
+        if (toolColorSelect) {
+            toolColorSelect.addEventListener('change', () => {
+                const color = toolColorSelect.value;
+                if (!color || !noteEditor) return;
+                const start = noteEditor.selectionStart;
+                const end = noteEditor.selectionEnd;
+                const text = noteEditor.value;
+                const selected = text.substring(start, end);
+                const replacement = `<font color="${color}">${selected || 'Barevný text'}</font>`;
+                noteEditor.value = text.substring(0, start) + replacement + text.substring(end);
+                rawNoteContent = noteEditor.value;
+                isUnsaved = true;
+                updateSaveStatus('Neuložené změny', true);
+                noteEditor.focus();
+                toolColorSelect.value = '';
+            });
+        }
     }
 
     async function insertFormatting(tool) {
@@ -801,6 +940,26 @@ document.addEventListener('DOMContentLoaded', () => {
             case 'h2':
                 replacement = `## ${selected || 'Nadpis 2'}`;
                 cursorOffset = 3;
+                break;
+            case 'highlight':
+                replacement = `==${selected || 'zvýrazněný text'}==`;
+                cursorOffset = 2;
+                break;
+            case 'strike':
+                replacement = `~~${selected || 'přeškrtnutý text'}~~`;
+                cursorOffset = 2;
+                break;
+            case 'wikilink':
+                replacement = `[[${selected || 'Název poznámky'}]]`;
+                cursorOffset = 2;
+                break;
+            case 'callout':
+                replacement = `\n> [!NOTE] Poznámka\n> ${selected || 'Text poznámky...'}\n`;
+                cursorOffset = 18;
+                break;
+            case 'table':
+                replacement = `\n| Záhlaví 1 | Záhlaví 2 |\n| :--- | :--- |\n| ${selected || 'Položka 1'} | Položka 2 |\n`;
+                cursorOffset = replacement.length;
                 break;
             case 'hr':
                 replacement = `\n---\n`;
@@ -1037,15 +1196,27 @@ document.addEventListener('DOMContentLoaded', () => {
             .replace(/'/g, "&#039;");
     }
 
-    // Markdown Parser
+    // === COMPREHENSIVE OBSIDIAN MARKDOWN PARSER ===
     function parseObsidianMarkdown(markdown, filePath) {
         const noteTitle = getFileNameWithoutExtension(filePath);
-        const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+        // Remove Obsidian comments %%...%%
+        markdown = markdown.replace(/%%[\s\S]*?%%/g, '');
 
+        const lines = markdown.replace(/\r\n/g, '\n').split('\n');
         let htmlBlocks = [];
         htmlBlocks.push(`<h1>${escapeHtml(noteTitle)}</h1>`);
 
+        // Collect footnotes
+        let footnotes = {};
+        lines.forEach(line => {
+            const fnMatch = line.match(/^\[\^(\w+)\]:\s*(.+)$/);
+            if (fnMatch) {
+                footnotes[fnMatch[1]] = fnMatch[2];
+            }
+        });
+
         let paragraphLines = [];
+        let i = 0;
 
         function flushParagraph() {
             if (paragraphLines.length > 0) {
@@ -1058,89 +1229,386 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
-        for (let i = 0; i < lines.length; i++) {
+        while (i < lines.length) {
             const rawLine = lines[i];
             const trimmed = rawLine.trim();
 
-            if (trimmed === '---') {
+            // Skip footnote definitions (rendered at bottom)
+            if (/^\[\^\w+\]:\s*.+$/.test(trimmed)) {
+                i++;
+                continue;
+            }
+
+            // --- Raw SVG blocks (<svg ...> ... </svg>) ---
+            if (trimmed.startsWith('<svg') || /<svg[^>]*>/i.test(trimmed)) {
+                flushParagraph();
+                let svgLines = [];
+                while (i < lines.length) {
+                    svgLines.push(lines[i]);
+                    if (lines[i].includes('</svg>')) {
+                        i++;
+                        break;
+                    }
+                    i++;
+                }
+                htmlBlocks.push(`<div class="svg-inline-container">${svgLines.join('\n')}</div>`);
+                continue;
+            }
+
+            // --- Fenced code blocks (``` or ~~~) ---
+            if (/^```(\w*)/.test(trimmed) || /^~~~(\w*)/.test(trimmed)) {
+                flushParagraph();
+                const fence = trimmed.startsWith('```') ? '```' : '~~~';
+                const langMatch = trimmed.match(/^(?:```|~~~)(\w*)/);
+                const lang = langMatch ? langMatch[1] : '';
+                let codeLines = [];
+                i++;
+                while (i < lines.length && !lines[i].trim().startsWith(fence)) {
+                    codeLines.push(lines[i]);
+                    i++;
+                }
+                i++; // skip closing fence
+                const codeContent = escapeHtml(codeLines.join('\n'));
+
+                if (lang === 'mermaid') {
+                    htmlBlocks.push(`<div class="mermaid-container"><pre class="mermaid">${codeLines.join('\n')}</pre></div>`);
+                } else {
+                    const langLabel = lang ? `<span class="code-lang-label">${escapeHtml(lang)}</span>` : '';
+                    const langClass = lang ? ` class="language-${escapeHtml(lang)}"` : '';
+                    htmlBlocks.push(`<div class="code-block-wrapper">${langLabel}<button class="code-copy-btn" onclick="navigator.clipboard.writeText(this.parentElement.querySelector('code').textContent).then(()=>{this.textContent='Zkopírováno!';setTimeout(()=>this.textContent='Kopírovat',1500)})">Kopírovat</button><pre><code${langClass}>${codeContent}</code></pre></div>`);
+                }
+                continue;
+            }
+
+            // --- Math block $$ ---
+            if (trimmed === '$$') {
+                flushParagraph();
+                let mathLines = [];
+                i++;
+                while (i < lines.length && lines[i].trim() !== '$$') {
+                    mathLines.push(lines[i]);
+                    i++;
+                }
+                i++; // skip closing $$
+                const mathContent = mathLines.join('\n');
+                htmlBlocks.push(`<div class="math-block" data-math-block="${escapeHtml(mathContent)}"></div>`);
+                continue;
+            }
+
+            // --- Horizontal rules ---
+            if (/^(---+|\*\*\*+|___+)$/.test(trimmed)) {
                 flushParagraph();
                 htmlBlocks.push('<hr>');
+                i++;
                 continue;
             }
 
-            if (/^#\s+(.+)$/.test(rawLine)) {
+            // --- Callouts: > [!TYPE] title ---
+            const calloutMatch = trimmed.match(/^>\s*\[!([\w-]+)\]\s*(.*)?$/);
+            if (calloutMatch) {
                 flushParagraph();
-                const match = rawLine.match(/^#\s+(.+)$/);
-                htmlBlocks.push(`<h1>${inlineFormat(escapeHtml(match[1]), filePath)}</h1>`);
+                const calloutType = calloutMatch[1].toLowerCase();
+                const calloutTitle = calloutMatch[2] || calloutType.charAt(0).toUpperCase() + calloutType.slice(1);
+                let contentLines = [];
+                i++;
+                while (i < lines.length && /^>/.test(lines[i])) {
+                    contentLines.push(lines[i].replace(/^>\s?/, ''));
+                    i++;
+                }
+                const calloutIcons = {
+                    'note': '📝', 'info': 'ℹ️', 'tip': '💡', 'hint': '💡', 'important': '❗',
+                    'warning': '⚠️', 'caution': '🔥', 'danger': '⛔', 'bug': '🐛',
+                    'example': '📋', 'quote': '💬', 'cite': '💬', 'question': '❓',
+                    'faq': '❓', 'success': '✅', 'check': '✅', 'done': '✅',
+                    'failure': '❌', 'fail': '❌', 'missing': '❌', 'abstract': '📄',
+                    'summary': '📄', 'tldr': '📄', 'todo': '📌'
+                };
+                const icon = calloutIcons[calloutType] || '📝';
+                const contentHtml = contentLines.map(l => `<p>${inlineFormat(escapeHtml(l), filePath)}</p>`).join('\n');
+                htmlBlocks.push(`<div class="callout callout-${escapeHtml(calloutType)}">
+                    <div class="callout-title"><span class="callout-title-icon">${icon}</span> ${escapeHtml(calloutTitle)}</div>
+                    <div class="callout-content">${contentHtml}</div>
+                </div>`);
                 continue;
             }
 
-            if (/^##\s+(.+)$/.test(rawLine)) {
+            // --- Regular blockquotes ---
+            if (/^>\s?/.test(trimmed)) {
                 flushParagraph();
-                const match = rawLine.match(/^##\s+(.+)$/);
-                htmlBlocks.push(`<h2>${inlineFormat(escapeHtml(match[1]), filePath)}</h2>`);
+                let quoteLines = [];
+                while (i < lines.length && /^>/.test(lines[i].trim())) {
+                    quoteLines.push(lines[i].trim().replace(/^>\s?/, ''));
+                    i++;
+                }
+                const quoteHtml = quoteLines.map(l => `<p>${inlineFormat(escapeHtml(l), filePath)}</p>`).join('\n');
+                htmlBlocks.push(`<blockquote>${quoteHtml}</blockquote>`);
                 continue;
             }
 
-            if (/^###\s+(.+)$/.test(rawLine)) {
+            // --- Tables ---
+            if (/^\|(.+)\|\s*$/.test(trimmed) && i + 1 < lines.length && /^\|[\s:|-]+\|\s*$/.test(lines[i + 1].trim())) {
                 flushParagraph();
-                const match = rawLine.match(/^###\s+(.+)$/);
-                htmlBlocks.push(`<h3>${inlineFormat(escapeHtml(match[1]), filePath)}</h3>`);
+                // Parse header
+                const headerCells = trimmed.split('|').filter(c => c.trim() !== '').map(c => c.trim());
+                i++; // skip separator
+                // Parse alignment from separator
+                const sepLine = lines[i].trim();
+                const sepCells = sepLine.split('|').filter(c => c.trim() !== '');
+                const alignments = sepCells.map(cell => {
+                    const t = cell.trim();
+                    if (t.startsWith(':') && t.endsWith(':')) return 'center';
+                    if (t.endsWith(':')) return 'right';
+                    return 'left';
+                });
+                i++; // skip separator line
+
+                let tableRows = [];
+                while (i < lines.length && /^\|(.+)\|\s*$/.test(lines[i].trim())) {
+                    const cells = lines[i].trim().split('|').filter(c => c.trim() !== '').map(c => c.trim());
+                    tableRows.push(cells);
+                    i++;
+                }
+
+                let tableHtml = '<table><thead><tr>';
+                headerCells.forEach((cell, idx) => {
+                    const align = alignments[idx] ? ` style="text-align:${alignments[idx]}"` : '';
+                    tableHtml += `<th${align}>${inlineFormat(escapeHtml(cell), filePath)}</th>`;
+                });
+                tableHtml += '</tr></thead><tbody>';
+                tableRows.forEach(row => {
+                    tableHtml += '<tr>';
+                    row.forEach((cell, idx) => {
+                        const align = alignments[idx] ? ` style="text-align:${alignments[idx]}"` : '';
+                        tableHtml += `<td${align}>${inlineFormat(escapeHtml(cell), filePath)}</td>`;
+                    });
+                    tableHtml += '</tr>';
+                });
+                tableHtml += '</tbody></table>';
+                htmlBlocks.push(tableHtml);
                 continue;
             }
 
+            // --- Headings h1-h6 ---
+            const headingMatch = rawLine.match(/^(#{1,6})\s+(.+)$/);
+            if (headingMatch) {
+                flushParagraph();
+                const level = headingMatch[1].length;
+                const text = headingMatch[2];
+                htmlBlocks.push(`<h${level}>${inlineFormat(escapeHtml(text), filePath)}</h${level}>`);
+                i++;
+                continue;
+            }
+
+            // --- Task list items ---
+            const taskMatch = trimmed.match(/^[-*]\s+\[([ xX])\]\s+(.+)$/);
+            if (taskMatch) {
+                flushParagraph();
+                const checked = taskMatch[1] !== ' ';
+                const taskText = taskMatch[2];
+                const checkedAttr = checked ? ' checked disabled' : ' disabled';
+                const completedClass = checked ? ' completed' : '';
+                htmlBlocks.push(`<ul class="task-list"><li class="task-list-item${completedClass}"><input type="checkbox"${checkedAttr}><span class="task-text">${inlineFormat(escapeHtml(taskText), filePath)}</span></li></ul>`);
+                i++;
+                continue;
+            }
+
+            // --- Ordered lists ---
+            const olMatch = trimmed.match(/^(\d+)\.\s+(.+)$/);
+            if (olMatch) {
+                flushParagraph();
+                let olItems = [];
+                while (i < lines.length) {
+                    const olLineMatch = lines[i].trim().match(/^(\d+)\.\s+(.+)$/);
+                    if (olLineMatch) {
+                        olItems.push(olLineMatch[2]);
+                        i++;
+                    } else {
+                        break;
+                    }
+                }
+                let olHtml = '<ol>';
+                olItems.forEach(item => {
+                    olHtml += `<li>${inlineFormat(escapeHtml(item), filePath)}</li>`;
+                });
+                olHtml += '</ol>';
+                htmlBlocks.push(olHtml);
+                continue;
+            }
+
+            // --- Unordered lists (collect consecutive) ---
+            if (/^[-*+]\s+(.+)$/.test(trimmed)) {
+                flushParagraph();
+                let ulItems = [];
+                while (i < lines.length && /^[-*+]\s+(.+)$/.test(lines[i].trim())) {
+                    const listText = lines[i].trim().replace(/^[-*+]\s+/, '');
+                    ulItems.push(listText);
+                    i++;
+                }
+                let ulHtml = '<ul>';
+                ulItems.forEach(item => {
+                    ulHtml += `<li>${inlineFormat(escapeHtml(item), filePath)}</li>`;
+                });
+                ulHtml += '</ul>';
+                htmlBlocks.push(ulHtml);
+                continue;
+            }
+
+            // --- Standalone embed on its own line ---
             const wikilinkMatch = trimmed.match(/^!\[\[([^\]]+)\]\]$/);
             if (wikilinkMatch) {
                 flushParagraph();
                 const embedHtml = renderObsidianEmbed(wikilinkMatch[1], filePath);
                 htmlBlocks.push(embedHtml);
+                i++;
                 continue;
             }
 
+            // --- Standard markdown image on its own line ---
             const standardImgMatch = trimmed.match(/^!\[(.*?)\]\((.*?)\)$/);
             if (standardImgMatch) {
                 flushParagraph();
                 const alt = standardImgMatch[1];
                 const url = standardImgMatch[2];
-                const fileUrl = `file.php?f=${encodeURIComponent(resolveEmbedPath(url, filePath))}`;
+                const fileUrl = url.startsWith('http') ? url : `file.php?f=${encodeURIComponent(resolveEmbedPath(url, filePath))}`;
                 htmlBlocks.push(`<img src="${fileUrl}" alt="${escapeHtml(alt)}" style="max-width: 100%; height: auto; border-radius: 8px;">`);
+                i++;
                 continue;
             }
 
-            if (/^[\-\*]\s+(.+)$/.test(trimmed)) {
-                flushParagraph();
-                const listText = trimmed.replace(/^[\-\*]\s+/, '');
-                htmlBlocks.push(`<ul><li>${inlineFormat(escapeHtml(listText), filePath)}</li></ul>`);
-                continue;
-            }
-
+            // --- Empty line ---
             if (trimmed === '') {
                 flushParagraph();
+                i++;
                 continue;
             }
 
+            // --- Regular text line (collect into paragraph) ---
             paragraphLines.push(escapeHtml(rawLine));
+            i++;
         }
 
         flushParagraph();
+
+        // Append footnotes section if any
+        const footnoteKeys = Object.keys(footnotes);
+        if (footnoteKeys.length > 0) {
+            let fnHtml = '<div class="footnotes-section"><hr><h4>Poznámky pod čarou</h4>';
+            footnoteKeys.forEach(key => {
+                fnHtml += `<div class="footnote-item" id="fn-${escapeHtml(key)}"><sup>${escapeHtml(key)}</sup> ${inlineFormat(escapeHtml(footnotes[key]), filePath)}</div>`;
+            });
+            fnHtml += '</div>';
+            htmlBlocks.push(fnHtml);
+        }
+
         return htmlBlocks.join('\n');
     }
 
+    // === COMPREHENSIVE INLINE FORMATTER ===
     function inlineFormat(text, currentFilePath) {
         if (!text) return '';
 
+        // Obsidian embeds ![[...]]
         text = text.replace(/!\[\[([^\]]+)\]\]/g, (match, embedPath) => {
             return renderObsidianEmbed(embedPath, currentFilePath);
         });
 
+        // Standard markdown images ![alt](url)
         text = text.replace(/!\[(.*?)\]\((.*?)\)/g, (match, alt, url) => {
-            const fileUrl = `file.php?f=${encodeURIComponent(resolveEmbedPath(url, currentFilePath))}`;
+            const fileUrl = url.startsWith('http') ? url : `file.php?f=${encodeURIComponent(resolveEmbedPath(url, currentFilePath))}`;
             return `<img src="${fileUrl}" alt="${escapeHtml(alt)}" style="max-width: 100%; height: auto; border-radius: 8px;">`;
         });
 
-        text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-        text = text.replace(/\*(.*?)\*/g, '<em>$1</em>');
+        // Wiki links [[note]] and [[note|display]]
+        text = text.replace(/\[\[([^\]]+?)\|([^\]]+?)\]\]/g, (match, target, display) => {
+            const cleanTarget = target.trim();
+            return `<a class="obsidian-wikilink" href="#" onclick="event.preventDefault(); window.openWikilink('${escapeHtml(cleanTarget)}')" title="${escapeHtml(cleanTarget)}">${escapeHtml(display)}</a>`;
+        });
+        text = text.replace(/\[\[([^\]|]+?)\]\]/g, (match, target) => {
+            const cleanTarget = target.trim();
+            return `<a class="obsidian-wikilink" href="#" onclick="event.preventDefault(); window.openWikilink('${escapeHtml(cleanTarget)}')" title="${escapeHtml(cleanTarget)}">${escapeHtml(cleanTarget)}</a>`;
+        });
+
+        // Custom Color Syntax: [text]{color: red} or [text]{#ff5555}
+        text = text.replace(/\[([^\]]+)\]\{color:\s*([^}]+)\}/gi, '<span style="color: $2;">$1</span>');
+        text = text.replace(/\[([^\]]+)\]\{(#(?:[0-9a-fA-F]{3}){1,2}|[a-zA-Z]+)\}/g, '<span style="color: $2;">$1</span>');
+
+        // Standard markdown links [text](url)
+        text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, linkText, url) => {
+            const target = url.startsWith('http') ? ' target="_blank" rel="noopener"' : '';
+            return `<a href="${url}"${target} style="color: var(--accent-color); text-decoration: underline;">${linkText}</a>`;
+        });
+
+        // Footnote references [^1]
+        text = text.replace(/\[\^(\w+)\]/g, (match, key) => {
+            return `<a class="footnote-ref" href="#fn-${escapeHtml(key)}" title="Poznámka pod čarou ${escapeHtml(key)}">[${escapeHtml(key)}]</a>`;
+        });
+
+        // Inline math $...$
+        text = text.replace(/\$([^$]+?)\$/g, (match, math) => {
+            return `<span class="math-inline" data-math-inline="${escapeHtml(math)}"></span>`;
+        });
+
+        // Highlight ==text==
+        text = text.replace(/==(.*?)==/g, '<mark class="obsidian-highlight">$1</mark>');
+
+        // Strikethrough ~~text~~
+        text = text.replace(/~~(.*?)~~/g, '<del>$1</del>');
+
+        // Bold **text**
+        text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+        // Italic *text* (but not inside ** which was already processed)
+        text = text.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em>$1</em>');
+
+        // Inline code `text`
         text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+        // Tags #tag (but not heading markers, not hex colors)
+        text = text.replace(/(^|\s)#([a-zA-Z\u00C0-\u024F][a-zA-Z0-9\u00C0-\u024F_/-]*)/g, (match, prefix, tag) => {
+            return `${prefix}<span class="obsidian-tag" onclick="if(typeof filterByTag==='function') filterByTag('${escapeHtml(tag)}')">#${escapeHtml(tag)}</span>`;
+        });
+
+        // Allowed inline HTML: <font color="..."> </font>, <mark>, <kbd>, <u>, <sub>, <sup>, <br>, <s>
+        // Unescape font tags with any attributes
+        text = text.replace(/&lt;font(\s+[^&>]*)?&gt;/gi, (match, attrs) => {
+            if (!attrs) return '<font>';
+            return `<font${attrs.replace(/&quot;/g, '"')}>`;
+        });
+        text = text.replace(/&lt;\/font&gt;/gi, '</font>');
+
+        // Unescape span tags with style or class
+        text = text.replace(/&lt;span(\s+[^&>]*)?&gt;/gi, (match, attrs) => {
+            if (!attrs) return '<span>';
+            return `<span${attrs.replace(/&quot;/g, '"')}>`;
+        });
+        text = text.replace(/&lt;\/span&gt;/gi, '</span>');
+
+        // Unescape div/p with style
+        text = text.replace(/&lt;div(\s+[^&>]*)?&gt;/gi, (match, attrs) => {
+            if (!attrs) return '<div>';
+            return `<div${attrs.replace(/&quot;/g, '"')}>`;
+        });
+        text = text.replace(/&lt;\/div&gt;/gi, '</div>');
+
+        // Unescape basic inline HTML
+        text = text.replace(/&lt;mark&gt;/gi, '<mark>');
+        text = text.replace(/&lt;\/mark&gt;/gi, '</mark>');
+        text = text.replace(/&lt;kbd&gt;/gi, '<kbd>');
+        text = text.replace(/&lt;\/kbd&gt;/gi, '</kbd>');
+        text = text.replace(/&lt;u&gt;/gi, '<u>');
+        text = text.replace(/&lt;\/u&gt;/gi, '</u>');
+        text = text.replace(/&lt;sub&gt;/gi, '<sub>');
+        text = text.replace(/&lt;\/sub&gt;/gi, '</sub>');
+        text = text.replace(/&lt;sup&gt;/gi, '<sup>');
+        text = text.replace(/&lt;\/sup&gt;/gi, '</sup>');
+        text = text.replace(/&lt;br\s*\/?&gt;/gi, '<br>');
+        text = text.replace(/&lt;s&gt;/gi, '<s>');
+        text = text.replace(/&lt;\/s&gt;/gi, '</s>');
+
+        // Unescape inline SVG elements
+        text = text.replace(/&lt;(\/?(?:svg|path|rect|circle|line|polygon|polyline|ellipse|text|g|defs|linearGradient|radialGradient|stop|clipPath|mask|use)[^&>]*)&gt;/gi, (match, inner) => {
+            return `<${inner.replace(/&quot;/g, '"')}>`;
+        });
 
         return text;
     }
@@ -1168,6 +1636,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const ext = cleanName.split('.').pop().toLowerCase();
         const styleAttr = widthStyle ? `style="${widthStyle} height: auto; border-radius: 8px;"` : `style="max-width: 100%; height: auto; border-radius: 8px;"`;
 
+        // Transcluded note preview (![[Note]] or ![[Note.md]])
+        if (ext === 'md' || !cleanName.includes('.')) {
+            const noteName = cleanName.replace(/\.md$/i, '');
+            return `<div class="embedded-note">
+                <div class="embedded-note-title">📄 <a class="obsidian-wikilink" href="#" onclick="event.preventDefault(); window.openWikilink('${escapeHtml(noteName)}')">${escapeHtml(noteName)}</a></div>
+                <div class="embedded-note-preview" data-embed-note="${escapeHtml(noteName)}"><em>Načítání vložené poznámky...</em></div>
+            </div>`;
+        }
+
         if (['m4a', 'mp3', 'ogg', 'wav', 'aac', 'flac'].includes(ext)) {
             return `<audio controls src="${fileUrl}" style="max-width: 100%;"></audio>`;
         }
@@ -1181,6 +1658,500 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         return `<a href="${fileUrl}" target="_blank" style="color: var(--accent-color);">${escapeHtml(cleanName)}</a>`;
+    }
+
+    // Helper: Filter sidebar tree by tag
+    window.filterByTag = function(tag) {
+        if (!searchInput) return;
+        searchInput.value = `#${tag}`;
+        searchInput.dispatchEvent(new Event('input'));
+        if (!sidebar.classList.contains('open')) {
+            toggleSidebar();
+        }
+    };
+
+    // === MOBILE BOTTOM NAVIGATION BAR ===
+    const mBtnFiles = document.getElementById('m-btn-files');
+    const mBtnSearch = document.getElementById('m-btn-search');
+    const mBtnGraph = document.getElementById('m-btn-graph');
+    const mBtnMode = document.getElementById('m-btn-mode');
+    const mBtnNewNote = document.getElementById('m-btn-new-note');
+
+    if (mBtnFiles) {
+        mBtnFiles.addEventListener('click', () => {
+            toggleSidebar();
+        });
+    }
+
+    if (mBtnSearch) {
+        mBtnSearch.addEventListener('click', () => {
+            if (!sidebar.classList.contains('open')) {
+                toggleSidebar();
+            }
+            setTimeout(() => {
+                if (searchInput) searchInput.focus();
+            }, 300);
+        });
+    }
+
+    if (mBtnMode) {
+        mBtnMode.addEventListener('click', () => {
+            if (!currentFilePath) return;
+            if (isEditingMode) {
+                showPreviewView();
+            } else if (isEditAllowed) {
+                showEditorView();
+            }
+        });
+    }
+
+    if (mBtnNewNote) {
+        mBtnNewNote.addEventListener('click', () => {
+            createNewFile('');
+        });
+    }
+
+    // === OBSIDIAN INTERACTIVE GRAPH VIEW ===
+    const btnOpenGraph = document.getElementById('btn-open-graph');
+    const graphModal = document.getElementById('graph-modal');
+    const graphBtnClose = document.getElementById('graph-btn-close');
+    const graphBtnFit = document.getElementById('graph-btn-fit');
+    const graphSearch = document.getElementById('graph-search');
+    const graphCanvas = document.getElementById('graph-canvas');
+    const graphStats = document.getElementById('graph-stats');
+
+    let graphData = { nodes: [], links: [] };
+    let graphAnimationId = null;
+    let graphTransform = { x: 0, y: 0, k: 1 };
+    let isDraggingGraph = false;
+    let draggedNode = null;
+    let dragStartPos = { x: 0, y: 0 };
+    let hoveredNode = null;
+    let graphFilterQuery = '';
+
+    if (btnOpenGraph) {
+        btnOpenGraph.addEventListener('click', openGraphView);
+    }
+    if (mBtnGraph) {
+        mBtnGraph.addEventListener('click', openGraphView);
+    }
+    if (graphBtnClose) {
+        graphBtnClose.addEventListener('click', closeGraphView);
+    }
+    if (graphBtnFit) {
+        graphBtnFit.addEventListener('click', resetGraphView);
+    }
+    if (graphSearch) {
+        graphSearch.addEventListener('input', (e) => {
+            graphFilterQuery = e.target.value.toLowerCase().trim();
+        });
+    }
+
+    // Keyboard shortcut Ctrl+G for Graph View
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+            e.preventDefault();
+            if (graphModal.style.display === 'flex') {
+                closeGraphView();
+            } else {
+                openGraphView();
+            }
+        }
+        if (e.key === 'Escape' && graphModal.style.display === 'flex') {
+            closeGraphView();
+        }
+    });
+
+    async function openGraphView() {
+        graphModal.style.display = 'flex';
+        resizeGraphCanvas();
+
+        try {
+            const resp = await fetch('file.php?action=graph_data');
+            if (!resp.ok) throw new Error('Nepodařilo se načíst data grafu.');
+            const data = await resp.json();
+
+            if (data.success) {
+                initGraphSimulation(data.nodes, data.links);
+            }
+        } catch (err) {
+            console.error('Graph data error:', err);
+        }
+    }
+
+    function closeGraphView() {
+        graphModal.style.display = 'none';
+        if (graphAnimationId) {
+            cancelAnimationFrame(graphAnimationId);
+            graphAnimationId = null;
+        }
+    }
+
+    function resizeGraphCanvas() {
+        if (!graphCanvas) return;
+        const rect = graphCanvas.parentElement.getBoundingClientRect();
+        graphCanvas.width = rect.width * (window.devicePixelRatio || 1);
+        graphCanvas.height = rect.height * (window.devicePixelRatio || 1);
+        graphCanvas.style.width = `${rect.width}px`;
+        graphCanvas.style.height = `${rect.height}px`;
+    }
+
+    window.addEventListener('resize', () => {
+        if (graphModal && graphModal.style.display === 'flex') {
+            resizeGraphCanvas();
+        }
+    });
+
+    function initGraphSimulation(rawNodes, rawLinks) {
+        const width = graphCanvas.parentElement.clientWidth;
+        const height = graphCanvas.parentElement.clientHeight;
+
+        graphTransform = { x: width / 2, y: height / 2, k: 1 };
+
+        // Position nodes randomly in a disk around center
+        const nodeMap = new Map();
+        const nodes = rawNodes.map((n, i) => {
+            const angle = (i / rawNodes.length) * 2 * Math.PI;
+            const r = 80 + Math.random() * Math.min(width, height) * 0.3;
+            const node = {
+                ...n,
+                x: Math.cos(angle) * r,
+                y: Math.sin(angle) * r,
+                vx: 0,
+                vy: 0,
+                radius: Math.max(4, Math.min(12, 4 + (n.size || 1) * 1.5)),
+                isCurrent: (currentFilePath && (n.path === currentFilePath || currentFilePath.endsWith(n.path)))
+            };
+            nodeMap.set(n.id, node);
+            return node;
+        });
+
+        // Resolve link references to node objects
+        const links = [];
+        rawLinks.forEach(l => {
+            const s = nodeMap.get(l.source);
+            const t = nodeMap.get(l.target);
+            if (s && t) {
+                links.push({ source: s, target: t });
+            }
+        });
+
+        graphData = { nodes, links };
+        if (graphStats) {
+            graphStats.textContent = `${nodes.length} poznámek, ${links.length} vazeb`;
+        }
+
+        setupGraphInteractions();
+        runGraphSimulation();
+    }
+
+    function resetGraphView() {
+        const width = graphCanvas.parentElement.clientWidth;
+        const height = graphCanvas.parentElement.clientHeight;
+        graphTransform = { x: width / 2, y: height / 2, k: 1 };
+        if (graphSearch) {
+            graphSearch.value = '';
+            graphFilterQuery = '';
+        }
+    }
+
+    function setupGraphInteractions() {
+        let isPointerDown = false;
+        let startPointer = { x: 0, y: 0 };
+        let hasMoved = false;
+        let initialPinchDistance = null;
+        let initialScale = 1;
+
+        const getCanvasPoint = (clientX, clientY) => {
+            const rect = graphCanvas.getBoundingClientRect();
+            const sx = clientX - rect.left;
+            const sy = clientY - rect.top;
+            return {
+                x: (sx - graphTransform.x) / graphTransform.k,
+                y: (sy - graphTransform.y) / graphTransform.k
+            };
+        };
+
+        const findNodeAt = (wx, wy) => {
+            for (let i = graphData.nodes.length - 1; i >= 0; i--) {
+                const n = graphData.nodes[i];
+                const dx = n.x - wx;
+                const dy = n.y - wy;
+                const hitRadius = (n.radius + 6) / graphTransform.k;
+                if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+                    return n;
+                }
+            }
+            return null;
+        };
+
+        // Pointer down
+        const onDown = (clientX, clientY) => {
+            isPointerDown = true;
+            hasMoved = false;
+            startPointer = { x: clientX, y: clientY };
+            const p = getCanvasPoint(clientX, clientY);
+            draggedNode = findNodeAt(p.x, p.y);
+            dragStartPos = { ...p };
+        };
+
+        // Pointer move
+        const onMove = (clientX, clientY) => {
+            const dx = clientX - startPointer.x;
+            const dy = clientY - startPointer.y;
+            if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+                hasMoved = true;
+            }
+
+            if (isPointerDown) {
+                if (draggedNode) {
+                    const p = getCanvasPoint(clientX, clientY);
+                    draggedNode.x = p.x;
+                    draggedNode.y = p.y;
+                    draggedNode.vx = 0;
+                    draggedNode.vy = 0;
+                } else {
+                    graphTransform.x += dx;
+                    graphTransform.y += dy;
+                    startPointer = { x: clientX, y: clientY };
+                }
+            } else {
+                const p = getCanvasPoint(clientX, clientY);
+                hoveredNode = findNodeAt(p.x, p.y);
+                graphCanvas.style.cursor = hoveredNode ? 'pointer' : 'grab';
+            }
+        };
+
+        // Pointer up
+        const onUp = (clientX, clientY) => {
+            if (!hasMoved && draggedNode) {
+                // Clicked a node! Open note!
+                const clickedPath = draggedNode.path;
+                closeGraphView();
+                selectFile(clickedPath);
+            }
+            isPointerDown = false;
+            draggedNode = null;
+            initialPinchDistance = null;
+        };
+
+        // Mouse events
+        graphCanvas.onmousedown = (e) => onDown(e.clientX, e.clientY);
+        window.onmousemove = (e) => {
+            if (graphModal.style.display === 'flex') onMove(e.clientX, e.clientY);
+        };
+        window.onmouseup = (e) => {
+            if (graphModal.style.display === 'flex') onUp(e.clientX, e.clientY);
+        };
+
+        // Mouse Wheel Zoom
+        graphCanvas.onwheel = (e) => {
+            e.preventDefault();
+            const rect = graphCanvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
+            const newK = Math.max(0.15, Math.min(5, graphTransform.k * zoomFactor));
+
+            graphTransform.x = mouseX - (mouseX - graphTransform.x) * (newK / graphTransform.k);
+            graphTransform.y = mouseY - (mouseY - graphTransform.y) * (newK / graphTransform.k);
+            graphTransform.k = newK;
+        };
+
+        // Touch events for mobile phones (Touch drag + pinch zoom)
+        graphCanvas.ontouchstart = (e) => {
+            if (e.touches.length === 1) {
+                const t = e.touches[0];
+                onDown(t.clientX, t.clientY);
+            } else if (e.touches.length === 2) {
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                initialPinchDistance = Math.hypot(dx, dy);
+                initialScale = graphTransform.k;
+            }
+        };
+
+        graphCanvas.ontouchmove = (e) => {
+            e.preventDefault();
+            if (e.touches.length === 1 && initialPinchDistance === null) {
+                const t = e.touches[0];
+                onMove(t.clientX, t.clientY);
+            } else if (e.touches.length === 2 && initialPinchDistance !== null) {
+                const dx = e.touches[0].clientX - e.touches[1].clientX;
+                const dy = e.touches[0].clientY - e.touches[1].clientY;
+                const dist = Math.hypot(dx, dy);
+                const zoomFactor = dist / initialPinchDistance;
+                const newK = Math.max(0.2, Math.min(4, initialScale * zoomFactor));
+
+                const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+                const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+                const rect = graphCanvas.getBoundingClientRect();
+                const sx = midX - rect.left;
+                const sy = midY - rect.top;
+
+                graphTransform.x = sx - (sx - graphTransform.x) * (newK / graphTransform.k);
+                graphTransform.y = sy - (sy - graphTransform.y) * (newK / graphTransform.k);
+                graphTransform.k = newK;
+            }
+        };
+
+        graphCanvas.ontouchend = (e) => {
+            if (e.changedTouches.length > 0) {
+                const t = e.changedTouches[0];
+                onUp(t.clientX, t.clientY);
+            }
+        };
+    }
+
+    function runGraphSimulation() {
+        const ctx = graphCanvas.getContext('2d');
+        const dpr = window.devicePixelRatio || 1;
+
+        function step() {
+            if (graphModal.style.display !== 'flex') return;
+
+            const { nodes, links } = graphData;
+
+            // Physics step
+            // 1. Repulsion between all nodes
+            for (let i = 0; i < nodes.length; i++) {
+                for (let j = i + 1; j < nodes.length; j++) {
+                    const n1 = nodes[i];
+                    const n2 = nodes[j];
+                    const dx = n2.x - n1.x;
+                    const dy = n2.y - n1.y;
+                    const distSq = dx * dx + dy * dy || 1;
+                    const dist = Math.sqrt(distSq);
+
+                    if (dist < 400) {
+                        const force = 350 / distSq;
+                        const fx = (dx / dist) * force;
+                        const fy = (dy / dist) * force;
+
+                        if (n1 !== draggedNode) {
+                            n1.vx -= fx;
+                            n1.vy -= fy;
+                        }
+                        if (n2 !== draggedNode) {
+                            n2.vx += fx;
+                            n2.vy += fy;
+                        }
+                    }
+                }
+            }
+
+            // 2. Spring force along links
+            for (const link of links) {
+                const s = link.source;
+                const t = link.target;
+                const dx = t.x - s.x;
+                const dy = t.y - s.y;
+                const dist = Math.hypot(dx, dy) || 1;
+                const targetDist = 70;
+                const springForce = (dist - targetDist) * 0.04;
+
+                const fx = (dx / dist) * springForce;
+                const fy = (dy / dist) * springForce;
+
+                if (s !== draggedNode) {
+                    s.vx += fx;
+                    s.vy += fy;
+                }
+                if (t !== draggedNode) {
+                    t.vx -= fx;
+                    t.vy -= fy;
+                }
+            }
+
+            // 3. Center gravity and damping
+            for (const n of nodes) {
+                if (n !== draggedNode) {
+                    n.vx -= n.x * 0.002;
+                    n.vy -= n.y * 0.002;
+
+                    n.vx *= 0.88;
+                    n.vy *= 0.88;
+
+                    n.x += n.vx;
+                    n.y += n.vy;
+                }
+            }
+
+            // Render step
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.clearRect(0, 0, graphCanvas.width, graphCanvas.height);
+
+            // Apply canvas camera transform
+            ctx.scale(dpr, dpr);
+            ctx.translate(graphTransform.x, graphTransform.y);
+            ctx.scale(graphTransform.k, graphTransform.k);
+
+            // Draw Links
+            ctx.lineWidth = 1;
+            for (const l of links) {
+                const isHighlighted = (hoveredNode && (l.source === hoveredNode || l.target === hoveredNode));
+                ctx.strokeStyle = isHighlighted ? 'rgba(168, 130, 255, 0.7)' : 'rgba(70, 70, 85, 0.4)';
+                ctx.beginPath();
+                ctx.moveTo(l.source.x, l.source.y);
+                ctx.lineTo(l.target.x, l.target.y);
+                ctx.stroke();
+            }
+
+            // Draw Nodes
+            for (const n of nodes) {
+                let isMatch = true;
+                if (graphFilterQuery) {
+                    isMatch = n.title.toLowerCase().includes(graphFilterQuery) ||
+                              (n.tags && n.tags.some(t => t.toLowerCase().includes(graphFilterQuery)));
+                }
+
+                const isHovered = (hoveredNode === n);
+                ctx.globalAlpha = isMatch ? 1 : 0.2;
+
+                // Node color
+                let fill = '#7f6df2';
+                if (n.isCurrent) {
+                    fill = '#ffd700'; // Current active note is gold!
+                } else if (n.unresolved) {
+                    fill = '#55555e'; // Unresolved
+                } else if (isHovered) {
+                    fill = '#a882ff';
+                }
+
+                // Node Circle
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, isHovered ? n.radius + 3 : n.radius, 0, 2 * Math.PI);
+                ctx.fillStyle = fill;
+                ctx.fill();
+
+                // Glow for active note or hovered
+                if (n.isCurrent || isHovered) {
+                    ctx.strokeStyle = n.isCurrent ? 'rgba(255, 215, 0, 0.4)' : 'rgba(168, 130, 255, 0.4)';
+                    ctx.lineWidth = 4;
+                    ctx.stroke();
+                }
+
+                // Label
+                ctx.fillStyle = isHovered ? '#ffffff' : (n.isCurrent ? '#ffd700' : '#dcddde');
+                ctx.font = `${Math.max(10, Math.min(13, 11 / Math.sqrt(graphTransform.k)))}px -apple-system, sans-serif`;
+                ctx.fillText(n.title, n.x + n.radius + 4, n.y + 4);
+
+                ctx.globalAlpha = 1;
+            }
+
+            ctx.restore();
+            graphAnimationId = requestAnimationFrame(step);
+        }
+
+        if (graphAnimationId) cancelAnimationFrame(graphAnimationId);
+        graphAnimationId = requestAnimationFrame(step);
+    }
+
+    // Initialize Mermaid
+    if (typeof mermaid !== 'undefined') {
+        mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
     }
 
     // Initialize application

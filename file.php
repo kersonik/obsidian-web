@@ -421,6 +421,100 @@ if ($action === 'rename') {
         echo json_encode(["success" => false, "message" => "Chyba při přejmenování."]);
     }
     exit;
+// --- API: Get Graph Data for Obsidian Graph View ---
+if ($action === 'graph_data') {
+    if (ob_get_level()) ob_clean();
+    header("Content-Type: application/json; charset=utf-8");
+
+    $nodes = [];
+    $links = [];
+    $nodeMap = [];
+
+    function scanVaultForGraph($dir, $realVaultBase, &$nodes, &$links, &$nodeMap) {
+        if (!is_dir($dir)) return;
+        $items = @scandir($dir);
+        if ($items === false) return;
+
+        foreach ($items as $item) {
+            if ($item === '.' || $item === '..' || $item[0] === '.') continue;
+            $full = $dir . '/' . $item;
+            if (is_dir($full)) {
+                scanVaultForGraph($full, $realVaultBase, $nodes, $links, $nodeMap);
+            } else if (strtolower(pathinfo($item, PATHINFO_EXTENSION)) === 'md') {
+                $rel = ltrim(str_replace([$realVaultBase, '\\'], ['', '/'], $full), '/');
+                $title = pathinfo($item, PATHINFO_FILENAME);
+                $content = @file_get_contents($full) ?: '';
+
+                // Extract tags
+                preg_match_all('/(?:^|\s)#([a-zA-Z\x{0080}-\x{FFFF}][a-zA-Z0-9\x{0080}-\x{FFFF}_\/-]*)/u', $content, $tagMatches);
+                $tags = array_values(array_unique($tagMatches[1] ?? []));
+
+                // Extract wikilinks [[link]] or [[link|display]]
+                preg_match_all('/\[\[([^\]|]+)(?:\|[^\]]+)?\]\]/', $content, $linkMatches);
+                $rawLinks = array_values(array_unique($linkMatches[1] ?? []));
+
+                $nodeId = $title;
+                $nodeMap[strtolower($title)] = $nodeId;
+                $nodeMap[strtolower($rel)] = $nodeId;
+
+                $nodes[] = [
+                    'id' => $nodeId,
+                    'path' => $rel,
+                    'title' => $title,
+                    'tags' => $tags,
+                    'rawLinks' => $rawLinks,
+                    'size' => count($rawLinks) + 1
+                ];
+            }
+        }
+    }
+
+    scanVaultForGraph($realVaultBase, $realVaultBase, $nodes, $links, $nodeMap);
+
+    // Build links
+    foreach ($nodes as &$node) {
+        $sourceId = $node['id'];
+        foreach ($node['rawLinks'] as $target) {
+            $targetClean = trim(str_replace('.md', '', $target));
+            $targetLower = strtolower($targetClean);
+            if (isset($nodeMap[$targetLower])) {
+                $targetId = $nodeMap[$targetLower];
+                if ($sourceId !== $targetId) {
+                    $links[] = [
+                        'source' => $sourceId,
+                        'target' => $targetId
+                    ];
+                }
+            } else {
+                // Link to nonexistent note (unresolved)
+                $unresolvedId = $targetClean;
+                if (!isset($nodeMap[$targetLower])) {
+                    $nodeMap[$targetLower] = $unresolvedId;
+                    $nodes[] = [
+                        'id' => $unresolvedId,
+                        'path' => $targetClean . '.md',
+                        'title' => $unresolvedId,
+                        'tags' => [],
+                        'rawLinks' => [],
+                        'size' => 1,
+                        'unresolved' => true
+                    ];
+                }
+                $links[] = [
+                    'source' => $sourceId,
+                    'target' => $unresolvedId
+                ];
+            }
+        }
+        unset($node['rawLinks']);
+    }
+
+    echo json_encode([
+        'success' => true,
+        'nodes' => $nodes,
+        'links' => $links
+    ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    exit;
 }
 
 // 3. Endpoint: List files/folders JSON
