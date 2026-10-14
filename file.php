@@ -421,6 +421,8 @@ if ($action === 'rename') {
         echo json_encode(["success" => false, "message" => "Chyba při přejmenování."]);
     }
     exit;
+}
+
 // --- API: Get Graph Data for Obsidian Graph View ---
 if ($action === 'graph_data') {
     if (ob_get_level()) ob_clean();

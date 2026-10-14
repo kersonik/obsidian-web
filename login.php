@@ -60,12 +60,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!empty($error)) {
         // Already blocked
     } else {
-        // Bcrypt hashes for 090112 and nevimcodelam
-        $readonlyHash = '$2y$10$dEwXPfdu5MVgN1BJXN7kT.WTOvdztbi.GWRgcpmXETleK026QzIA.';
-        $editHash     = '$2b$10$DRel7GW6aFx0KtmbYinQTOIQlMFL/tPFX6QQhTodW7GQqFySB5c8.';
+        // Bcrypt hashes for configured access modes
+        $readonlyHash = '$2y$10$u4I2jmJsZuEXfXzVAPhn8OJkLCMJd3Zz0MclaUy/JwrJrV9OcLmKm';
+        $editHash     = '$2y$10$GtVUpKIbgaPHMr2Sw2eRKedlTT8WPIZDgowtqT6rBuS2DRAwW/UeO';
 
-        $isReadonly = password_verify($password, $readonlyHash) || ($password === '090112');
-        $isEdit     = password_verify($password, $editHash) || ($password === 'nevimcodelam');
+        $isReadonly = password_verify($password, $readonlyHash);
+        $isEdit     = password_verify($password, $editHash);
 
         if ($isReadonly) {
             // Read-Only Login
@@ -238,7 +238,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <form action="login.php" method="POST">
             <div class="input-group">
                 <input type="password" name="password" placeholder="Heslo" required autofocus autocomplete="current-password">
-                <small>heslo do mého telefonu</small>
             </div>
             <button type="submit">Přihlásit se</button>
         </form>
