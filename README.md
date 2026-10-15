@@ -1,170 +1,142 @@
-# 🔮 Obsidian Vault Web Viewer & Editor
+# Obsidian Vault Web Viewer & Editor
 
-> A lightweight, zero-dependency, self-hosted PHP & JavaScript web interface for viewing, editing, and managing your [Obsidian](https://obsidian.md/) vault across desktop and mobile devices.
+> Moderní, lehké a bezpečné webové rozhraní pro prohlížení a editaci vašich [Obsidian](https://obsidian.md/) trezorů na desktopu i mobilu. Obsahuje plnou autentizaci se SQLite, granulární správu oprávnění, redesignovaný Admin Panel s interaktivní AJAX maticí, audit logování, detekci konfliktů a bleskové fulltextové vyhledávání s přímou podporou synchronizace přes Syncthing.
 
-[![PHP Version](https://img.shields.io/badge/PHP-7.4%2B-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://www.php.net/)
+[![PHP Version](https://img.shields.io/badge/PHP-7.4%2B%20%2F%208.x-777BB4?style=for-the-badge&logo=php&logoColor=white)](https://www.php.net/)
 [![Theme](https://img.shields.io/badge/Theme-Obsidian%20Dark-7F6DF2?style=for-the-badge&logo=obsidian&logoColor=white)](https://obsidian.md/)
-[![Dependencies](https://img.shields.io/badge/Dependencies-Zero%20(Vanilla%20JS%2FPHP)-success?style=for-the-badge)](https://developer.mozilla.org/en-US/docs/Web/JavaScript)
+[![Database](https://img.shields.io/badge/Database-SQLite3-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 
 ---
 
-## ✨ Features
+## Funkce (Features)
 
-- **📱 Authentic Obsidian Aesthetics**: Pitch-black (`#000000`) OLED dark theme matching native Obsidian mobile & desktop applications.
-- **🔐 Dual-Mode Authentication System**:
-  - **Read-Only Mode**: Safe view mode for browsing notes without edit permissions.
-  - **Edit Mode**: Full vault access to create, edit, rename, move, and delete files & folders.
-- **📝 Live Markdown & Media Parser**:
-  - Wikilink image embeds (`![[image.jpg]]`, `![[image.jpg|300]]`).
-  - Audio & video embeds (`![[recording.m4a]]`, `![[video.mp4]]`).
-  - Auto-generated note titles, headings (`#`, `##`, `###`), horizontal dividers (`---`), lists, and inline formatting.
-- **🖼️ Native File Explorer & Drag & Drop Uploads**:
-  - Insert images and audio directly into notes using your device's native file picker (`🖼️ Insert Image`, `🎵 Insert Audio`).
-  - Drag and drop image files directly onto the editor textarea to automatically upload and embed them.
-- **🚚 Drag & Drop File & Folder Moving**:
-  - Drag items in the sidebar tree onto target folders to move them instantly.
-  - Mobile-optimized move button (`⇄`) with custom in-app folder selector modal.
-- **🎨 Custom In-App Modal Dialog System**:
-  - Custom dark-mode dialogs for prompts and confirmations, ensuring 100% compatibility across mobile browsers where native `prompt()` is blocked.
-- **🛡️ Built-in Security & Rate Limiting**:
-  - IP-based rate limiting (5 failed login attempts trigger a 30-minute lockdown).
-  - Canonical `realpath()` path validation preventing directory traversal attacks outside `/vault`.
+- **Obsidian Dark Vzhled bez rušivých emoji**: Čistý, minimalistický dark motiv plně ladící s nativní aplikací Obsidian na mobilu i počítači. Veškeré ikony jsou čisté SVG vektory.
+- **Kompletní autentizace & SQLite databáze**:
+  - Ukládání uživatelů a oprávnění v SQLite databázi (`data/obsidian.sqlite`).
+  - Hashování hesel standardním `password_hash()` (Bcrypt / Argon2id).
+  - Ochrana proti brute-force útokům (5 pokusů -> dočasný ban IP na 30 minut).
+  - CSRF ochrana u všech stavových požadavků.
+- **Granulární správa oprávnění & Interaktivní matice**:
+  - Podpora více nezávislých vaultů (`vaults/<nazev-vaultu>`).
+  - Úrovně přístupu: **Žádný přístup** (uživatel vault nevidí) / **Pouze čtení (Read)** / **Čtení i zápis (Write)**.
+  - Administrátoři mají automaticky plný přístup ke všem trezorům.
+- **Redesignovaný Admin Panel s AJAX maticí**:
+  - Jednotná interaktivní matice: Uživatelé v řádcích, vaulty ve sloupcích.
+  - Okamžitá editace v matici – změna oprávnění se ukládá na pozadí přes AJAX bez reloadu stránky.
+  - Přehledné rozdělení do záložek: **Matice oprávnění**, **Správa uživatelů**, **Správa vaultů**, **Audit logy**.
+  - Vestavěný prohlížeč logů s fixní výškou, monospace fontem a filtry podle akcí (`CREATE`, `UPDATE`, `DELETE`, `RENAME`, `DENIED`).
+- **Kompatibilita se Syncthing**:
+  - Složka s vaulty (`vaults/`) plně podporuje souběžný běh se službou Syncthing.
+  - Aplikace automaticky chrání a ignoruje synchronizační metadata (`.stfolder`, `.stversions`, `.syncthing*`, `.obsidian`, `.trash`).
+  - Konzistentní práva souborů (`umask 0002`, `chmod 0664/0775`) umožňují bezkolizní souběžnou editaci uživateli `www-data` i `ubuntu` (Syncthing).
+- **Detekce konfliktů (Conflict Detection)**:
+  - Přenos časových značek `X-Last-Modified` a ETagu při načítání souborů.
+  - Ochrana před nechtěným přepsáním změn jiného uživatele (HTTP 409 Conflict) s možností volby přepsání či znovunačtení.
+- **Bleskové fulltextové vyhledávání**:
+  - Okamžité prohledávání názvů i obsahu všech poznámek v otevřeném vaultu.
+  - Automatické využití `ripgrep` (`rg`), pokud je nainstalován, s fallbackem na nativní PHP rekurzi.
+- **Strom složek (File Explorer)**:
+  - Chevron šipka s plynulou rotací a ukládáním stavu rozbalených složek v `localStorage`.
 
 ---
 
-## 🏗️ System Architecture
+## Struktura projektu
 
-```mermaid
-graph TD
-    subgraph Client["Client Browser (Mobile & Desktop)"]
-        UI["Obsidian OLED Dark UI (index.php)"]
-        JS["Markdown Parser & Tree Manager (app.js)"]
-        UI --- JS
-    end
-
-    subgraph Server["Web Server (PHP 7.4+)"]
-        Auth["Authentication & Rate Limiter (login.php)"]
-        API["RESTful Filesystem Controller (file.php)"]
-        Rate["Lockout State (ip_attempts.json)"]
-        Auth --- Rate
-    end
-
-    subgraph Storage["Filesystem Storage"]
-        Vault[("vault/ Root Directory")]
-        Notes["Markdown Files (*.md)"]
-        Media["Attachments (Images, Audio, Video)"]
-        Vault --- Notes
-        Vault --- Media
-    end
-
-    JS -->|"AJAX / Fetch API"| API
-    UI -->|"POST Credentials"| Auth
-    API -->|"Canonical realpath() Check"| Vault
+```
+/var/www/obsidian/
+├── index.php             # Hlavní UI editoru, přepínač vaultů, postranní panel, náhled/úpravy
+├── app.js                # Klientská logika, fulltext, správa stromu, detekce konfliktů, CSRF
+├── file.php              # REST API pro soubory, kontrola oprávnění, vyhledávání, audit logování
+├── login.php             # Přihlašovací obrazovka, rate limiting pokusů IP, správa relací
+├── admin.php             # Administrátorský panel s interaktivní AJAX maticí a záložkami
+├── db.php                # SQLite vrstva, automatická inicializace schématu, helpery práv
+├── auth.php              # Bezpečnost session, CSRF validace, audit logování, path traversal ochrana
+├── .htaccess             # Apache zabezpečení blokující přímý přístup k databázi, logům a vaultům
+├── data/                 # Složka SQLite databáze (obsidian.sqlite) - blokována před přímým webem
+├── logs/                 # Složka strukturovaných audit logů (log-<vault>.txt) - blokována před webem
+└── vaults/               # Složka s jednotlivými vaulty (synchronizováno přes Syncthing)
+    ├── default/          # Výchozí vault
+    └── Skola/            # Vault synchronizovaný přes Syncthing
 ```
 
 ---
 
-## 🔒 Security & Password Configuration
+## Nasazení na produkční Linux server (Ubuntu / Debian)
 
-> [!IMPORTANT]
-> **Password Configuration Required**:
-> For security reasons, default password hashes must be configured in `login.php` on **lines 12 and 13**.
-
-To generate a custom password hash for your vault, run the following PHP snippet:
+### 1. Potřebné balíčky
 ```bash
-php -r "echo password_hash('YOUR_NEW_PASSWORD', PASSWORD_BCRYPT) . PHP_EOL;"
+sudo apt update
+sudo apt install -y php8.1-fpm php8.1-sqlite3 php8.1-mbstring sqlite3 nginx ripgrep certbot python3-certbot-nginx
 ```
 
-Then update `login.php`:
-```php
-// Lines 12 & 13 in login.php:
-$readonly_hash = password_hash('YOUR_READONLY_PASSWORD', PASSWORD_BCRYPT);
-$edit_hash     = password_hash('YOUR_EDIT_PASSWORD', PASSWORD_BCRYPT);
-```
-
-### Security Highlights
-1. **Password Hash Verification**: Passwords are validated using PHP's `password_verify()` against stored Bcrypt hashes.
-2. **Session Locking**: All modification endpoints (`action=save`, `action=upload`, `action=move`, `action=delete`, `action=rename`, `action=create_file`, `action=create_folder`) strictly enforce `$_SESSION['mode'] === 'edit'` and return `403 Forbidden` otherwise.
-3. **Path Traversal Protection**: All filesystem accesses resolve through canonical `realpath()` checks, ensuring no requests can read or write outside the designated `vault/` root directory.
-4. **Brute-Force Protection**: IP attempts are tracked in `ip_attempts.json`. Reaching 5 invalid attempts locks out the IP address for 1800 seconds (30 minutes).
-
----
-
-## 🚀 Installation & Setup
-
-### Requirements
-- **Web Server**: Apache, Nginx, LiteSpeed, Caddy, or PHP Built-in Server.
-- **PHP**: PHP 7.4 or PHP 8.x with `json` and standard file system extensions enabled.
-- **Database**: None required (uses standard server filesystem).
-
-### Quick Start (Production Server)
-1. Clone the repository into your web server document root:
-   ```bash
-   git clone git@github.com:kersonik/obsidian-web.git
-   cd obsidian-web
-   ```
-
-2. Set proper directory permissions for the `vault/` directory so PHP can save notes and uploaded media:
-   ```bash
-   mkdir -p vault
-   chmod -R 775 vault
-   ```
-
-3. Open your web browser and navigate to `http://your-domain.com/login.php`.
-
-### Local Development / Quick Test
-You can start a temporary local server in seconds without installing Apache or Nginx:
-
+### 2. Oprávnění složek a integrace se Syncthing
+Protože Syncthing běží pod uživatelem `ubuntu` a webový server pod `www-data`:
 ```bash
-php -S 0.0.0.0:8000
-```
-Then navigate to `http://localhost:8000/login.php` in your browser.
+# Přidání uživatele ubuntu do skupiny www-data a naopak
+sudo usermod -a -G www-data ubuntu
+sudo usermod -a -G ubuntu www-data
 
----
-
-## 📁 Repository Structure
-
-```
-obsidian-web/
-├── index.php          # Main HTML structure, Obsidian dark CSS, modal backdrops
-├── app.js             # Markdown parser, AJAX file tree renderer, editor sync, Drag & Drop
-├── file.php           # RESTful PHP backend API & file server with path validation
-├── login.php          # Responsive login interface, Bcrypt hash checks & IP rate limiting
-├── ip_attempts.json   # Auto-generated rate limiting tracker (ignored in git)
-└── vault/             # Obsidian Markdown notes and attachments directory
-    ├── Note.md
-    └── attachments/
+# Vytvoření a nastavení práv pro složku webu
+sudo mkdir -p /var/www/obsidian/vaults
+sudo chown -R www-data:www-data /var/www/obsidian
+sudo chown -R ubuntu:www-data /var/www/obsidian/vaults
+sudo chmod -R 755 /var/www/obsidian
+sudo chmod -R 2775 /var/www/obsidian/vaults /var/www/obsidian/data /var/www/obsidian/logs
 ```
 
----
+*Poznámka: Nastavení bitu SGID (`chmod 2775`) zajistí, že veškeré nové soubory a složky vytvořené v trezorech automaticky dědí skupinu `www-data` s právy pro čtení i zápis jak pro web, tak pro Syncthing.*
 
-## 📡 Backend API Reference (`file.php`)
+### 3. Konfigurace Nginx (`/etc/nginx/sites-available/obsidian`)
+```nginx
+server {
+    listen 80;
+    server_name your-domain.com;
 
-| Method | Endpoint / Action | Description | Required Mode |
-| :--- | :--- | :--- | :--- |
-| `GET` | `file.php?action=list` | Returns full JSON directory tree of the vault | Authenticated |
-| `GET` | `file.php?f=path/to/note.md` | Serves file content with proper MIME type headers | Authenticated |
-| `POST` | `file.php?action=save` | Saves edited note content (`f`, `content`) | **Edit Mode** |
-| `POST` | `file.php?action=upload` | Uploads attachment file via native explorer | **Edit Mode** |
-| `POST` | `file.php?action=move` | Moves file/folder to target directory (`sourcePath`, `targetFolder`) | **Edit Mode** |
-| `POST` | `file.php?action=create_file` | Creates a new Markdown file (`name`, `parent`) | **Edit Mode** |
-| `POST` | `file.php?action=create_folder` | Creates a new directory (`name`, `parent`) | **Edit Mode** |
-| `POST` | `file.php?action=rename` | Renames file or directory (`oldPath`, `newName`) | **Edit Mode** |
-| `POST` | `file.php?action=delete` | Recursively deletes file or directory (`path`) | **Edit Mode** |
+    root /var/www/obsidian;
+    index index.php index.html;
 
----
+    client_max_body_size 50M;
 
-## ⌨️ Keyboard Shortcuts
+    # Striktní zákaz přímého přístupu k databázi, logům i trezorům
+    location ~ ^/(data|logs|vaults|vault)/ {
+        deny all;
+        return 403;
+    }
 
-| Shortcut | Action |
-| :--- | :--- |
-| `Ctrl + S` / `Cmd + S` | Instantly save current note to server |
-| `Escape` | Close active custom modal dialog |
-| `Enter` | Confirm action in custom modal dialog |
+    location ~ \.(sqlite|db|json|log)$ {
+        deny all;
+        return 403;
+    }
 
----
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
 
-## 📄 License
+    location ~ \.php$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+    }
 
-Distributed under the [MIT License](LICENSE). Built with ❤️ for Obsidian note takers.
+    location ~ /\.ht {
+        deny all;
+    }
+}
+```
+
+Aktivace a načtení konfigurace:
+```bash
+sudo ln -sf /etc/nginx/sites-available/obsidian /etc/nginx/sites-enabled/obsidian
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 4. Nastavení SSL certifikátu (HTTPS)
+```bash
+sudo certbot --nginx -d your-domain.com --non-interactive --agree-tos --redirect
+```
+
+### 5. Výchozí přihlašovací údaje
+- **Uživatelské jméno:** `admin`
+- **Heslo:** `admin123`
+
+Po prvním přihlášení otevřete v horní liště **Admin** (`admin.php`), přejděte na záložku **Správa uživatelů** a změňte si heslo administrátora.
