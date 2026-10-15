@@ -1,0 +1,19 @@
+# SQLite database files
+data/*.sqlite*
+data/*.db*
+
+# Audit logs
+logs/*.txt
+logs/*.log
+
+# Syncthing metadata
+**/.stfolder/
+**/.stversions/
+
+# OS / IDE artifacts
+.DS_Store
+Thumbs.db
+*.tmp
+*.bak
+.idea/
+.vscode/
