@@ -235,21 +235,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             line-height: 1.4;
             text-align: center;
         }
-        .default-hint {
-            margin-top: 24px;
-            padding-top: 16px;
-            border-top: 1px solid #1f1f24;
-            color: #6c6c74;
-            font-size: 0.78rem;
-            text-align: center;
-            line-height: 1.4;
-        }
-        .default-hint code {
-            color: #7f6df2;
-            background: #141416;
-            padding: 2px 6px;
-            border-radius: 4px;
-        }
     </style>
 </head>
 <body>
@@ -278,10 +263,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             </div>
             <button type="submit">Přihlásit se</button>
         </form>
-
-        <div class="default-hint">
-            Výchozí administrátor: <code>admin</code> / <code>admin123</code>
-        </div>
     </div>
 </body>
 </html>
