@@ -1,34 +1,62 @@
 <?php
-// Prevent any PHP warning/error output from corrupting JSON responses
+// file.php - Secure File Controller, Fulltext Search, Conflict Detection, and Audit Logging
+
 ob_start();
 error_reporting(E_ALL & ~E_NOTICE & ~E_WARNING);
 ini_set('display_errors', '0');
+umask(0002);
 
-session_start();
+require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/db.php';
 
-// 1. Security Check: verify active PHP session
-if (empty($_SESSION['logged_in'])) {
+// 1. Authenticate user
+$currentUser = getCurrentUser();
+if (!$currentUser) {
     if (ob_get_level()) ob_clean();
-    http_response_code(403);
+    http_response_code(401);
     header("Content-Type: application/json; charset=utf-8");
-    echo json_encode(["error" => "403 Forbidden", "message" => "Uživatel není přihlášen."]);
+    echo json_encode(["success" => false, "error" => "401 Unauthorized", "message" => "Uživatel není přihlášen."]);
     exit;
 }
 
-$userMode = $_SESSION['mode'] ?? 'readonly';
+$userId = $currentUser['id'];
+$isAdmin = $currentUser['is_admin'];
+$username = $currentUser['username'];
 
-// Determine vault directory location
-$vaultBaseDir = __DIR__ . '/vault';
-
-if (!is_dir($vaultBaseDir)) {
-    if (isset($_SERVER['DOCUMENT_ROOT']) && is_dir($_SERVER['DOCUMENT_ROOT'] . '/vault')) {
-        $vaultBaseDir = $_SERVER['DOCUMENT_ROOT'] . '/vault';
-    } else {
-        @mkdir($vaultBaseDir, 0777, true);
-    }
+// 2. Determine requested vault
+$userVaults = getUserAccessibleVaults($userId, $isAdmin);
+if (empty($userVaults)) {
+    if (ob_get_level()) ob_clean();
+    http_response_code(403);
+    header("Content-Type: application/json; charset=utf-8");
+    echo json_encode(["success" => false, "error" => "403 Forbidden", "message" => "Nemáte přiřazen žádný přístup k vaultům."]);
+    exit;
 }
 
-$realVaultBase = realpath($vaultBaseDir) ?: $vaultBaseDir;
+$requestedVault = trim($_GET['vault'] ?? $_POST['vault'] ?? '');
+if (empty($requestedVault) || !isset($userVaults[$requestedVault])) {
+    // Default to the first accessible vault
+    $requestedVault = array_key_first($userVaults);
+}
+
+$userPermission = $userVaults[$requestedVault] ?? null;
+if (!$userPermission) {
+    auditLog($requestedVault ?: 'unknown', 'DENIED', "Access denied to vault: {$requestedVault}", $username);
+    if (ob_get_level()) ob_clean();
+    http_response_code(403);
+    header("Content-Type: application/json; charset=utf-8");
+    echo json_encode(["success" => false, "error" => "403 Forbidden", "message" => "Nemáte oprávnění k vaultu '{$requestedVault}'."]);
+    exit;
+}
+
+$realVaultBase = getVaultPath($requestedVault);
+if (!$realVaultBase || !is_dir($realVaultBase)) {
+    if (ob_get_level()) ob_clean();
+    http_response_code(404);
+    header("Content-Type: application/json; charset=utf-8");
+    echo json_encode(["success" => false, "error" => "404 Not Found", "message" => "Složka vaultu nebyla na serveru nalezena."]);
+    exit;
+}
 
 // Helper: Recursively search for missing file in vault
 function findFileInVault($dir, $targetFilename) {
@@ -37,7 +65,7 @@ function findFileInVault($dir, $targetFilename) {
     if ($items === false) return false;
 
     foreach ($items as $item) {
-        if ($item === '.' || $item === '..' || $item[0] === '.') continue;
+        if (isIgnoredSyncOrSystemItem($item)) continue;
         $fullPath = $dir . '/' . $item;
 
         if (is_file($fullPath) && strcasecmp($item, $targetFilename) === 0) {
@@ -51,42 +79,71 @@ function findFileInVault($dir, $targetFilename) {
     return false;
 }
 
-// Helper: Recursive delete file or folder safely
+// Helper: Recursive delete file or folder safely (with strict Syncthing protection)
 function deleteRecursive($dir) {
+    if (isIgnoredSyncOrSystemItem(basename($dir))) {
+        return false; // Protect .stfolder, .stversions, .obsidian, etc.
+    }
     if (!is_dir($dir)) return @unlink($dir);
     $items = @scandir($dir);
     if ($items === false) return false;
 
     foreach ($items as $item) {
         if ($item === '.' || $item === '..') continue;
+        if (isIgnoredSyncOrSystemItem($item)) continue; // Never delete Syncthing sync markers
         if (!deleteRecursive($dir . "/" . $item)) return false;
     }
     return @rmdir($dir);
 }
 
-// Helper: Verify path is inside vault
-function isPathInsideVault($path, $realVaultBase) {
-    $normVaultBase = str_replace('\\', '/', $realVaultBase);
-    $normPath = str_replace('\\', '/', $path);
-    return strpos($normPath, $normVaultBase) === 0;
-}
-
-// 2. Action Handlers
+// 3. Action Dispatcher
 $action = $_GET['action'] ?? $_POST['action'] ?? '';
 
-// --- API: Save file content (EDIT MODE ONLY) ---
+// Check CSRF token on mutating requests
+$mutatingActions = ['save', 'upload', 'create_file', 'create_folder', 'delete', 'rename', 'move'];
+if (in_array($action, $mutatingActions, true)) {
+    if ($_SERVER['REQUEST_METHOD'] !== 'POST' || !verifyCsrfToken()) {
+        auditLog($requestedVault, 'DENIED', "CSRF verification failed for action: {$action}", $username);
+        if (ob_get_level()) ob_clean();
+        http_response_code(403);
+        header("Content-Type: application/json; charset=utf-8");
+        echo json_encode(["success" => false, "error" => "403 Forbidden", "message" => "Neplatný bezpečnostní CSRF token. Obnovte prosím stránku."]);
+        exit;
+    }
+
+    if ($userPermission !== 'write') {
+        auditLog($requestedVault, 'DENIED', "Write permission denied for action: {$action}", $username);
+        if (ob_get_level()) ob_clean();
+        http_response_code(403);
+        header("Content-Type: application/json; charset=utf-8");
+        echo json_encode(["success" => false, "error" => "403 Forbidden", "message" => "Pro tento vault máte pouze oprávnění ke čtení."]);
+        exit;
+    }
+
+    // Protect Syncthing and hidden metadata on all mutating actions
+    $checkTarget = $_POST['f'] ?? $_POST['path'] ?? $_POST['sourcePath'] ?? $_POST['oldPath'] ?? $_POST['name'] ?? '';
+    if (!empty($checkTarget)) {
+        $basenameCheck = basename(str_replace(['\\', '../', '..\\'], ['/', '', ''], $checkTarget));
+        if (isIgnoredSyncOrSystemItem($basenameCheck) || stripos($checkTarget, '/.st') !== false || stripos($checkTarget, '.syncthing') !== false) {
+            auditLog($requestedVault, 'DENIED', "Blocked action on protected sync/system item: {$checkTarget}", $username);
+            if (ob_get_level()) ob_clean();
+            http_response_code(403);
+            header("Content-Type: application/json; charset=utf-8");
+            echo json_encode(["success" => false, "error" => "403 Forbidden", "message" => "Systémové soubory a metadata synchronizace Syncthing nelze upravovat."]);
+            exit;
+        }
+    }
+}
+
+// --- API: Save note content with Conflict Detection (EDIT/WRITE ONLY) ---
 if ($action === 'save') {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
 
-    if ($userMode !== 'edit') {
-        http_response_code(403);
-        echo json_encode(["success" => false, "message" => "Režim čtení. Úpravy nejsou povoleny."]);
-        exit;
-    }
-
-    $filePath = $_POST['f'] ?? $_GET['f'] ?? '';
+    $filePath = $_POST['f'] ?? '';
     $content  = $_POST['content'] ?? '';
+    $clientMtime = (int)($_POST['last_modified'] ?? 0);
+    $forceSave   = !empty($_POST['force']);
 
     if (empty($filePath)) {
         http_response_code(400);
@@ -98,24 +155,52 @@ if ($action === 'save') {
     $fullPath = $realVaultBase . '/' . ltrim($filePath, '/');
 
     if (!isPathInsideVault($fullPath, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Path traversal attempt: {$filePath}", $username);
         http_response_code(403);
         echo json_encode(["success" => false, "message" => "Neplatná cesta k souboru."]);
         exit;
     }
 
+    // Conflict detection: Check if file was modified after client fetched it
+    if (file_exists($fullPath) && !$forceSave && $clientMtime > 0) {
+        clearstatcache(true, $fullPath);
+        $serverMtime = filemtime($fullPath);
+        if ($serverMtime > $clientMtime) {
+            http_response_code(409); // Conflict
+            echo json_encode([
+                "success"      => false,
+                "conflict"     => true,
+                "server_mtime" => $serverMtime,
+                "client_mtime" => $clientMtime,
+                "message"      => "Konflikt: Soubor byl na disku mezitím změněn jiným uživatelem. Obnovte soubor nebo potvrďte přepsání."
+            ]);
+            exit;
+        }
+    }
+
     $dir = dirname($fullPath);
     if (!is_dir($dir)) {
-        @mkdir($dir, 0777, true);
+        @mkdir($dir, 0775, true);
     }
 
     if (file_exists($fullPath) && !is_writable($fullPath)) {
-        @chmod($fullPath, 0666);
+        @chmod($fullPath, 0664);
     }
 
     $result = @file_put_contents($fullPath, $content);
 
     if ($result !== false) {
-        echo json_encode(["success" => true, "message" => "Soubor byl úspěšně uložen na server."]);
+        @chmod($fullPath, 0664);
+        clearstatcache(true, $fullPath);
+        $newMtime = filemtime($fullPath);
+
+        auditLog($requestedVault, 'UPDATE', $filePath, $username);
+
+        echo json_encode([
+            "success"       => true,
+            "last_modified" => $newMtime,
+            "message"       => "Soubor byl úspěšně uložen na server."
+        ]);
     } else {
         $lastError = error_get_last();
         $errorMsg = $lastError ? $lastError['message'] : 'Chyba oprávnění zápisu.';
@@ -125,16 +210,10 @@ if ($action === 'save') {
     exit;
 }
 
-// --- API: Move file or folder between directories (EDIT MODE ONLY) ---
+// --- API: Move file or folder (WRITE ONLY) ---
 if ($action === 'move') {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
-
-    if ($userMode !== 'edit') {
-        http_response_code(403);
-        echo json_encode(["success" => false, "message" => "Režim čtení. Přesouvání není povoleno."]);
-        exit;
-    }
 
     $sourcePath   = trim($_POST['sourcePath'] ?? '');
     $targetFolder = trim($_POST['targetFolder'] ?? '');
@@ -151,6 +230,7 @@ if ($action === 'move') {
     $realSourcePath = realpath($fullSourcePath);
 
     if ($realSourcePath === false || !isPathInsideVault($realSourcePath, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Invalid source path for move: {$sourcePath}", $username);
         http_response_code(404);
         echo json_encode(["success" => false, "message" => "Zdrojový soubor nebyl nalezen."]);
         exit;
@@ -160,12 +240,13 @@ if ($action === 'move') {
     $fullTargetDir = empty($targetFolder) ? $realVaultBase : $realVaultBase . '/' . ltrim($targetFolder, '/');
 
     if (!is_dir($fullTargetDir)) {
-        @mkdir($fullTargetDir, 0777, true);
+        @mkdir($fullTargetDir, 0775, true);
     }
 
     $fullTargetPath = $fullTargetDir . '/' . $itemName;
 
     if (!isPathInsideVault($fullTargetPath, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Invalid target path for move: {$targetFolder}", $username);
         http_response_code(403);
         echo json_encode(["success" => false, "message" => "Neplatná cílová složka."]);
         exit;
@@ -178,6 +259,7 @@ if ($action === 'move') {
 
     if (@rename($realSourcePath, $fullTargetPath)) {
         $newRel = ltrim(str_replace([$realVaultBase, '\\'], ['', '/'], $fullTargetPath), '/');
+        auditLog($requestedVault, 'RENAME', "{$sourcePath} -> {$newRel}", $username);
         echo json_encode(["success" => true, "newPath" => $newRel, "message" => "Soubor byl úspěšně přesunut."]);
     } else {
         http_response_code(500);
@@ -186,21 +268,15 @@ if ($action === 'move') {
     exit;
 }
 
-// --- API: Upload file via native file explorer (EDIT MODE ONLY) ---
+// --- API: Upload file via native file explorer (WRITE ONLY) ---
 if ($action === 'upload') {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
 
-    if ($userMode !== 'edit') {
-        http_response_code(403);
-        echo json_encode(["success" => false, "message" => "Režim čtení. Nahrávání souborů není povoleno."]);
-        exit;
-    }
-
     if (empty($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
         $errCode = $_FILES['file']['error'] ?? 'no_file';
         http_response_code(400);
-        echo json_encode(["success" => false, "message" => "Chyba nahrávání (Kód chyby: {$errCode})."]);
+        echo json_encode(["success" => false, "message" => "Chyba nahrávání (Kód: {$errCode})."]);
         exit;
     }
 
@@ -213,19 +289,23 @@ if ($action === 'upload') {
 
     $targetDir = empty($targetSubDir) ? $realVaultBase : $realVaultBase . '/' . ltrim($targetSubDir, '/');
     if (!is_dir($targetDir)) {
-        @mkdir($targetDir, 0777, true);
+        @mkdir($targetDir, 0775, true);
     }
 
     $targetPath = $targetDir . '/' . $originalName;
 
     if (!isPathInsideVault($targetPath, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Upload path traversal attempt: {$targetPath}", $username);
         http_response_code(403);
         echo json_encode(["success" => false, "message" => "Neplatná cesta pro uložení nahrávaného souboru."]);
         exit;
     }
 
     if (move_uploaded_file($uploadedFile['tmp_name'], $targetPath) || @copy($uploadedFile['tmp_name'], $targetPath)) {
-        @chmod($targetPath, 0666);
+        @chmod($targetPath, 0664);
+        $relPath = ltrim(str_replace([$realVaultBase, '\\'], ['', '/'], $targetPath), '/');
+        auditLog($requestedVault, 'CREATE', $relPath, $username);
+
         echo json_encode([
             "success"  => true,
             "filename" => $originalName,
@@ -233,21 +313,15 @@ if ($action === 'upload') {
         ]);
     } else {
         http_response_code(500);
-        echo json_encode(["success" => false, "message" => "Nepodařilo se uložit nahrávaný soubor na disk serveru. Zkontrolujte oprávnění složky vault."]);
+        echo json_encode(["success" => false, "message" => "Nepodařilo se uložit nahrávaný soubor na disk. Zkontrolujte oprávnění."]);
     }
     exit;
 }
 
-// --- API: Create new file (EDIT MODE ONLY) ---
+// --- API: Create new file (WRITE ONLY) ---
 if ($action === 'create_file') {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
-
-    if ($userMode !== 'edit') {
-        http_response_code(403);
-        echo json_encode(["success" => false, "message" => "Režim čtení. Vytváření souborů není povoleno."]);
-        exit;
-    }
 
     $fileName = trim($_POST['name'] ?? '');
     $parentPath = trim($_POST['parent'] ?? '');
@@ -268,6 +342,7 @@ if ($action === 'create_file') {
     $fullPath  = $targetDir . '/' . $fileName;
 
     if (!isPathInsideVault($fullPath, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Create file path traversal: {$fullPath}", $username);
         http_response_code(403);
         echo json_encode(["success" => false, "message" => "Neplatná cesta."]);
         exit;
@@ -282,8 +357,9 @@ if ($action === 'create_file') {
     $initialContent  = "# {$titleWithoutExt}\n\nNapište obsah své poznámky zde...\n";
 
     if (@file_put_contents($fullPath, $initialContent) !== false) {
-        @chmod($fullPath, 0666);
+        @chmod($fullPath, 0664);
         $relPath = ltrim(str_replace([$realVaultBase, '\\'], ['', '/'], $fullPath), '/');
+        auditLog($requestedVault, 'CREATE', $relPath, $username);
         echo json_encode(["success" => true, "path" => $relPath, "message" => "Soubor vytvořen."]);
     } else {
         http_response_code(500);
@@ -292,16 +368,10 @@ if ($action === 'create_file') {
     exit;
 }
 
-// --- API: Create new folder (EDIT MODE ONLY) ---
+// --- API: Create new folder (WRITE ONLY) ---
 if ($action === 'create_folder') {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
-
-    if ($userMode !== 'edit') {
-        http_response_code(403);
-        echo json_encode(["success" => false, "message" => "Režim čtení. Vytváření složek není povoleno."]);
-        exit;
-    }
 
     $folderName = trim($_POST['name'] ?? '');
     $parentPath = trim($_POST['parent'] ?? '');
@@ -318,6 +388,7 @@ if ($action === 'create_folder') {
     $fullPath  = $targetDir . '/' . $folderName;
 
     if (!isPathInsideVault($fullPath, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Create folder path traversal: {$fullPath}", $username);
         http_response_code(403);
         echo json_encode(["success" => false, "message" => "Neplatná cesta."]);
         exit;
@@ -328,7 +399,9 @@ if ($action === 'create_folder') {
         exit;
     }
 
-    if (@mkdir($fullPath, 0777, true)) {
+    if (@mkdir($fullPath, 0775, true)) {
+        $relPath = ltrim(str_replace([$realVaultBase, '\\'], ['', '/'], $fullPath), '/');
+        auditLog($requestedVault, 'CREATE', $relPath, $username);
         echo json_encode(["success" => true, "message" => "Složka vytvořena."]);
     } else {
         http_response_code(500);
@@ -337,16 +410,10 @@ if ($action === 'create_folder') {
     exit;
 }
 
-// --- API: Delete file or folder (EDIT MODE ONLY) ---
+// --- API: Delete file or folder (WRITE ONLY) ---
 if ($action === 'delete') {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
-
-    if ($userMode !== 'edit') {
-        http_response_code(403);
-        echo json_encode(["success" => false, "message" => "Režim čtení. Smazání není povoleno."]);
-        exit;
-    }
 
     $targetRel = trim($_POST['path'] ?? '');
     $targetRel = str_replace(['\\', '../', '..\\'], ['/', '', ''], $targetRel);
@@ -354,30 +421,26 @@ if ($action === 'delete') {
     $realTarget = realpath($fullPath);
 
     if ($realTarget === false || !isPathInsideVault($realTarget, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Delete path traversal attempt: {$targetRel}", $username);
         http_response_code(404);
         echo json_encode(["success" => false, "message" => "Položka nebyla nalezena."]);
         exit;
     }
 
     if (deleteRecursive($realTarget)) {
+        auditLog($requestedVault, 'DELETE', $targetRel, $username);
         echo json_encode(["success" => true, "message" => "Smazáno."]);
     } else {
         http_response_code(500);
-        echo json_encode(["success" => false, "message" => "Chyba při mazání."]);
+        echo json_encode(["success" => false, "message" => "Chyba při mazání položky."]);
     }
     exit;
 }
 
-// --- API: Rename file or folder (EDIT MODE ONLY) ---
+// --- API: Rename file or folder (WRITE ONLY) ---
 if ($action === 'rename') {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
-
-    if ($userMode !== 'edit') {
-        http_response_code(403);
-        echo json_encode(["success" => false, "message" => "Režim čtení. Přejmenování není povoleno."]);
-        exit;
-    }
 
     $oldRel = trim($_POST['oldPath'] ?? '');
     $newName = trim($_POST['newName'] ?? '');
@@ -392,6 +455,7 @@ if ($action === 'rename') {
     $realOldPath = realpath($fullOldPath);
 
     if ($realOldPath === false || !isPathInsideVault($realOldPath, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Rename path traversal: {$oldRel}", $username);
         http_response_code(404);
         echo json_encode(["success" => false, "message" => "Původní soubor nebyl nalezen."]);
         exit;
@@ -408,6 +472,7 @@ if ($action === 'rename') {
     $fullNewPath = $parentDir . '/' . $newName;
 
     if (!isPathInsideVault($fullNewPath, $realVaultBase)) {
+        auditLog($requestedVault, 'DENIED', "Rename invalid new path: {$fullNewPath}", $username);
         http_response_code(403);
         echo json_encode(["success" => false, "message" => "Neplatný nový název."]);
         exit;
@@ -415,6 +480,7 @@ if ($action === 'rename') {
 
     if (@rename($realOldPath, $fullNewPath)) {
         $newRel = ltrim(str_replace([$realVaultBase, '\\'], ['', '/'], $fullNewPath), '/');
+        auditLog($requestedVault, 'RENAME', "{$oldRel} -> {$newRel}", $username);
         echo json_encode(["success" => true, "newPath" => $newRel, "message" => "Přejmenováno."]);
     } else {
         http_response_code(500);
@@ -423,7 +489,142 @@ if ($action === 'rename') {
     exit;
 }
 
-// --- API: Get Graph Data for Obsidian Graph View ---
+// --- API: Fulltext Search (READ/WRITE) ---
+if ($action === 'search') {
+    if (ob_get_level()) ob_clean();
+    header("Content-Type: application/json; charset=utf-8");
+
+    $query = trim($_GET['q'] ?? $_POST['q'] ?? '');
+    if (empty($query)) {
+        echo json_encode(["success" => true, "query" => "", "results" => []]);
+        exit;
+    }
+
+    $results = [];
+    $maxResults = 40;
+
+    // Check if ripgrep (rg) is installed and executable
+    $hasRg = false;
+    $rgPath = '';
+    $checkCmd = (stripos(PHP_OS, 'WIN') === 0) ? 'where rg 2>nul' : 'which rg 2>/dev/null';
+    $output = @shell_exec($checkCmd);
+    if (!empty(trim((string)$output))) {
+        $hasRg = true;
+        $rgPath = trim(explode("\n", trim((string)$output))[0]);
+    }
+
+    if ($hasRg) {
+        // Use ripgrep for ultra-fast search
+        $escapedQuery = escapeshellarg($query);
+        $escapedDir   = escapeshellarg($realVaultBase);
+        $cmd = "{$rgPath} -i -n --no-heading --max-count 2 -g \"*.md\" --glob \"!.st*\" --glob \"!*syncthing*\" --glob \"!.obsidian*\" --glob \"!.trash*\" {$escapedQuery} {$escapedDir} 2>&1";
+        $rgOutput = @shell_exec($cmd);
+
+        if (!empty($rgOutput)) {
+            $lines = explode("\n", trim($rgOutput));
+            foreach ($lines as $line) {
+                if (count($results) >= $maxResults) break;
+                // Output format: /path/to/file.md:line:content
+                $parts = explode(':', $line, 3);
+                if (count($parts) >= 3) {
+                    $matchedFile = $parts[0];
+                    $lineNum     = (int)$parts[1];
+                    $snippet     = trim($parts[2]);
+
+                    $relPath = ltrim(str_replace([$realVaultBase, '\\'], ['', '/'], $matchedFile), '/');
+                    $filename = basename($matchedFile);
+
+                    // Truncate long snippets
+                    if (mb_strlen($snippet) > 160) {
+                        $snippet = mb_substr($snippet, 0, 160) . '...';
+                    }
+
+                    $results[] = [
+                        'filename' => $filename,
+                        'path'     => $relPath,
+                        'line'     => $lineNum,
+                        'snippet'  => $snippet
+                    ];
+                }
+            }
+        }
+    }
+
+    // Fallback: Native PHP recursive search (or search matching filenames)
+    if (!$hasRg || count($results) < $maxResults) {
+        $searchRecursive = function($dir, $baseDir) use (&$searchRecursive, &$results, $query, $maxResults) {
+            if (!is_dir($dir)) return;
+            $items = @scandir($dir);
+            if ($items === false) return;
+
+            foreach ($items as $item) {
+                if (count($results) >= $maxResults) return;
+                if (isIgnoredSyncOrSystemItem($item)) continue;
+
+                $full = $dir . '/' . $item;
+                if (is_dir($full)) {
+                    $searchRecursive($full, $baseDir);
+                } elseif (strtolower(pathinfo($item, PATHINFO_EXTENSION)) === 'md') {
+                    $rel = ltrim(str_replace([$baseDir, '\\'], ['', '/'], $full), '/');
+                    $title = pathinfo($item, PATHINFO_FILENAME);
+
+                    // 1. Check title match
+                    $hasTitleMatch = (stripos($title, $query) !== false);
+
+                    // 2. Search lines in file
+                    $content = @file_get_contents($full);
+                    if ($content !== false) {
+                        $lines = explode("\n", $content);
+                        $foundInContent = false;
+
+                        foreach ($lines as $idx => $lineStr) {
+                            if (stripos($lineStr, $query) !== false) {
+                                $cleanSnippet = trim($lineStr);
+                                if (mb_strlen($cleanSnippet) > 160) {
+                                    $cleanSnippet = mb_substr($cleanSnippet, 0, 160) . '...';
+                                }
+                                $results[] = [
+                                    'filename' => $item,
+                                    'path'     => $rel,
+                                    'line'     => $idx + 1,
+                                    'snippet'  => $cleanSnippet
+                                ];
+                                $foundInContent = true;
+                                if (count($results) >= $maxResults) return;
+                                break; // 1 match per note is enough for overview
+                            }
+                        }
+
+                        if (!$foundInContent && $hasTitleMatch) {
+                            $results[] = [
+                                'filename' => $item,
+                                'path'     => $rel,
+                                'line'     => 1,
+                                'snippet'  => 'Název poznámky odpovídá hledanému výrazu'
+                            ];
+                        }
+                    }
+                }
+            }
+        };
+
+        // If rg didn't run, execute native search
+        if (!$hasRg) {
+            $searchRecursive($realVaultBase, $realVaultBase);
+        }
+    }
+
+    echo json_encode([
+        'success' => true,
+        'query'   => $query,
+        'engine'  => $hasRg ? 'ripgrep' : 'native_php',
+        'count'   => count($results),
+        'results' => $results
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+// --- API: Get Graph Data (READ/WRITE) ---
 if ($action === 'graph_data') {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
@@ -438,7 +639,7 @@ if ($action === 'graph_data') {
         if ($items === false) return;
 
         foreach ($items as $item) {
-            if ($item === '.' || $item === '..' || $item[0] === '.') continue;
+            if (isIgnoredSyncOrSystemItem($item)) continue;
             $full = $dir . '/' . $item;
             if (is_dir($full)) {
                 scanVaultForGraph($full, $realVaultBase, $nodes, $links, $nodeMap);
@@ -460,12 +661,12 @@ if ($action === 'graph_data') {
                 $nodeMap[strtolower($rel)] = $nodeId;
 
                 $nodes[] = [
-                    'id' => $nodeId,
-                    'path' => $rel,
-                    'title' => $title,
-                    'tags' => $tags,
+                    'id'       => $nodeId,
+                    'path'     => $rel,
+                    'title'    => $title,
+                    'tags'     => $tags,
                     'rawLinks' => $rawLinks,
-                    'size' => count($rawLinks) + 1
+                    'size'     => count($rawLinks) + 1
                 ];
             }
         }
@@ -488,17 +689,16 @@ if ($action === 'graph_data') {
                     ];
                 }
             } else {
-                // Link to nonexistent note (unresolved)
                 $unresolvedId = $targetClean;
                 if (!isset($nodeMap[$targetLower])) {
                     $nodeMap[$targetLower] = $unresolvedId;
                     $nodes[] = [
-                        'id' => $unresolvedId,
-                        'path' => $targetClean . '.md',
-                        'title' => $unresolvedId,
-                        'tags' => [],
-                        'rawLinks' => [],
-                        'size' => 1,
+                        'id'         => $unresolvedId,
+                        'path'       => $targetClean . '.md',
+                        'title'      => $unresolvedId,
+                        'tags'       => [],
+                        'rawLinks'   => [],
+                        'size'       => 1,
                         'unresolved' => true
                     ];
                 }
@@ -513,13 +713,13 @@ if ($action === 'graph_data') {
 
     echo json_encode([
         'success' => true,
-        'nodes' => $nodes,
-        'links' => $links
+        'nodes'   => $nodes,
+        'links'   => $links
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit;
 }
 
-// 3. Endpoint: List files/folders JSON
+// --- API: List files/folders JSON (READ/WRITE) ---
 if ($action === 'list' || !isset($_GET['f'])) {
     if (ob_get_level()) ob_clean();
     header("Content-Type: application/json; charset=utf-8");
@@ -532,7 +732,7 @@ if ($action === 'list' || !isset($_GET['f'])) {
         if ($items === false) return [];
 
         foreach ($items as $item) {
-            if ($item === '.' || $item === '..' || $item[0] === '.') continue;
+            if (isIgnoredSyncOrSystemItem($item)) continue;
 
             $fullPath = $dir . '/' . $item;
             $relPath = $subPath !== '' ? $subPath . '/' . $item : $item;
@@ -540,9 +740,9 @@ if ($action === 'list' || !isset($_GET['f'])) {
             if (is_dir($fullPath)) {
                 $children = getVaultFiles($fullPath, $relPath);
                 $result[] = [
-                    'name' => $item,
-                    'type' => 'folder',
-                    'path' => $relPath,
+                    'name'     => $item,
+                    'type'     => 'folder',
+                    'path'     => $relPath,
                     'children' => $children
                 ];
             } else {
@@ -568,17 +768,31 @@ if ($action === 'list' || !isset($_GET['f'])) {
 
     $fileTree = getVaultFiles($realVaultBase);
 
+    // Format list of accessible vaults for the frontend vault selector
+    $vaultOptions = [];
+    foreach ($userVaults as $vName => $vPerm) {
+        $vaultOptions[] = [
+            'name'       => $vName,
+            'permission' => $vPerm
+        ];
+    }
+
     echo json_encode([
-        'success'     => true,
-        'mode'        => $userMode,
-        'vaultPath'   => str_replace('\\', '/', $realVaultBase),
-        'vaultExists' => is_dir($realVaultBase),
-        'tree'        => $fileTree
+        'success'          => true,
+        'vault'            => $requestedVault,
+        'permission'       => $userPermission, // 'read' or 'write'
+        'availableVaults'  => $vaultOptions,
+        'isAdmin'          => $isAdmin,
+        'username'         => $username,
+        'csrfToken'        => $_SESSION['csrf_token'],
+        'vaultPath'        => str_replace('\\', '/', $realVaultBase),
+        'vaultExists'      => is_dir($realVaultBase),
+        'tree'             => $fileTree
     ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
     exit;
 }
 
-// 4. Serve requested file content safely
+// 4. Serve requested file content safely (READ/WRITE)
 $requestedFile = $_GET['f'] ?? '';
 $requestedFile = str_replace('\\', '/', $requestedFile);
 $requestedFile = ltrim($requestedFile, '/');
@@ -588,6 +802,7 @@ if (strpos($requestedFile, '|') !== false) {
 }
 
 if (strpos($requestedFile, '../') !== false || strpos($requestedFile, '..\\') !== false) {
+    auditLog($requestedVault, 'DENIED', "Path traversal attempt in get file: {$requestedFile}", $username);
     if (ob_get_level()) ob_clean();
     http_response_code(403);
     header("Content-Type: text/plain; charset=utf-8");
@@ -650,6 +865,9 @@ $contentType = $mimeTypes[$ext] ?? 'application/octet-stream';
 
 if (ob_get_level()) ob_clean();
 
+// Send timestamp and ETag for conflict detection
+header("X-Last-Modified: " . filemtime($realTargetPath));
+header("ETag: \"" . md5_file($realTargetPath) . "\"");
 header("Content-Type: " . $contentType);
 header("Content-Length: " . filesize($realTargetPath));
 
