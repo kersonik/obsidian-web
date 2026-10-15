@@ -1,12 +1,24 @@
 <?php
-session_start();
+require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/db.php';
 
-if (empty($_SESSION['logged_in'])) {
-    header("Location: login.php");
-    exit;
+$currentUser = requireAuth(false);
+$userId = $currentUser['id'];
+$isAdmin = $currentUser['is_admin'];
+$username = $currentUser['username'];
+
+$userVaults = getUserAccessibleVaults($userId, $isAdmin);
+if (empty($userVaults)) {
+    die("Nemáte přiřazen přístup k žádnému vaultu. Kontaktujte administrátora.");
 }
 
-$userMode = $_SESSION['mode'] ?? 'readonly';
+$activeVault = trim($_GET['vault'] ?? array_key_first($userVaults));
+if (!isset($userVaults[$activeVault])) {
+    $activeVault = array_key_first($userVaults);
+}
+
+$userPermission = $userVaults[$activeVault];
+$userMode = ($userPermission === 'write') ? 'edit' : 'readonly';
 ?>
 <!DOCTYPE html>
 <html lang="cs">
@@ -359,13 +371,154 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
             color: var(--text-primary);
         }
 
+        .folder-chevron {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 16px;
+            height: 16px;
+            margin-right: 2px;
+            color: var(--text-secondary);
+            transition: transform 0.2s cubic-bezier(0.2, 0, 0, 1);
+            transform: rotate(90deg); /* Expanded = ▾ */
+            flex-shrink: 0;
+        }
+
+        .folder-header.collapsed .folder-chevron,
+        .folder-group.is-collapsed .folder-chevron {
+            transform: rotate(0deg); /* Collapsed = ▸ */
+        }
+
         .folder-content {
             padding-left: 12px;
             display: block;
         }
 
-        .folder-content.collapsed {
-            display: none;
+        .folder-content.collapsed,
+        .folder-group.is-collapsed > .folder-content {
+            display: none !important;
+        }
+
+        /* Search Results Panel */
+        .search-results-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 10px;
+        }
+
+        .search-results-container::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        .search-results-container::-webkit-scrollbar-thumb {
+            background-color: #222226;
+            border-radius: 3px;
+        }
+
+        .search-summary-badge {
+            font-size: 0.76rem;
+            color: var(--text-secondary);
+            padding: 4px 6px 8px 6px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .search-result-item {
+            background-color: #121214;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 8px 10px;
+            margin-bottom: 6px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .search-result-item:hover {
+            background-color: var(--bg-hover);
+            border-color: var(--accent-color);
+        }
+
+        .search-result-title {
+            font-size: 0.84rem;
+            font-weight: 600;
+            color: var(--text-heading);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 3px;
+        }
+
+        .search-result-path {
+            font-size: 0.72rem;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+            font-family: monospace;
+            word-break: break-all;
+        }
+
+        .search-result-snippet {
+            font-size: 0.78rem;
+            color: var(--text-primary);
+            line-height: 1.35;
+            background: #09090a;
+            padding: 4px 6px;
+            border-radius: 4px;
+            border-left: 2px solid var(--accent-color);
+        }
+
+        .search-result-snippet mark {
+            background-color: rgba(127, 109, 242, 0.35);
+            color: #ffffff;
+            font-weight: 600;
+            padding: 0 2px;
+            border-radius: 2px;
+        }
+
+        /* Header Vault select & Admin button */
+        .header-vault-select {
+            background-color: #141416;
+            border: 1px solid var(--border-color);
+            color: var(--text-heading);
+            font-size: 0.82rem;
+            font-weight: 500;
+            padding: 4px 8px;
+            border-radius: 6px;
+            outline: none;
+            cursor: pointer;
+            transition: border-color 0.2s;
+        }
+
+        .header-vault-select:focus {
+            border-color: var(--accent-color);
+        }
+
+        .admin-nav-btn {
+            background: rgba(127, 109, 242, 0.15);
+            color: var(--accent-color);
+            border: 1px solid rgba(127, 109, 242, 0.35);
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            transition: all 0.15s;
+        }
+
+        .admin-nav-btn:hover {
+            background: var(--accent-color);
+            color: #ffffff;
+        }
+
+        .header-user-tag {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            margin-right: 4px;
         }
 
         .item-icon {
@@ -1442,17 +1595,34 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
                     <path d="M18.5 28.5L78.5 28.5" stroke="#7F6DF2" stroke-width="4"/>
                     <path d="M8.5 63.5L91.5 68.5" stroke="#7F6DF2" stroke-width="4"/>
                 </svg>
-                Obsidian Vault
+                Obsidian Web
             </div>
+
+            <!-- Vault Selector -->
+            <select id="vault-select" class="header-vault-select" title="Zvolit aktivní vault">
+                <?php foreach ($userVaults as $vName => $vPerm): ?>
+                    <option value="<?php echo htmlspecialchars($vName, ENT_QUOTES, 'UTF-8'); ?>" <?php echo $vName === $activeVault ? 'selected' : ''; ?>>
+                        <?php echo htmlspecialchars($vName, ENT_QUOTES, 'UTF-8'); ?> (<?php echo $vPerm === 'write' ? 'Zápis' : 'Čtení'; ?>)
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
             <span class="mode-badge <?php echo $userMode; ?>">
-                <?php echo $userMode === 'edit' ? 'Úpravy' : 'Čtení'; ?>
+                <?php echo $userMode === 'edit' ? 'Úpravy' : 'Pouze čtení'; ?>
             </span>
         </div>
         <div class="header-right">
+            <?php if ($isAdmin): ?>
+                <a href="admin.php" class="admin-nav-btn" title="Otevřít Admin Panel">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    <span>Admin</span>
+                </a>
+            <?php endif; ?>
             <button id="btn-open-graph" class="header-icon-btn" title="Otevřít graf poznámek (Graph View)">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line></svg>
                 <span>Graf</span>
             </button>
+            <span class="header-user-tag"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -2px; margin-right: 3px;"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg><?php echo htmlspecialchars($username, ENT_QUOTES, 'UTF-8'); ?></span>
             <a href="login.php?logout=1" class="logout-btn">Odhlásit se</a>
         </div>
     </header>
@@ -1479,6 +1649,7 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
             <div class="sidebar-search">
                 <input type="text" id="search-input" class="search-input" placeholder="Hledat v poznámkách..." autocomplete="off">
             </div>
+            <div id="search-results" class="search-results-container" style="display: none;"></div>
             <div id="file-tree" class="file-tree-container">
                 <!-- Dynamically populated by app.js -->
             </div>
@@ -1494,13 +1665,16 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
 
                     <?php if ($userMode === 'edit'): ?>
                         <button id="btn-save-note" class="save-btn" style="display: none;">
-                            💾 Uložit
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                            Uložit
                         </button>
                         <button id="btn-toggle-view" class="tab-btn active">
-                            👁️ Náhled
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                            Náhled
                         </button>
                         <button id="btn-toggle-edit" class="tab-btn">
-                            ✏️ Úpravy
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                            Úpravy
                         </button>
                     <?php endif; ?>
                 </div>
@@ -1515,27 +1689,36 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
                     <button class="tool-btn" data-tool="h2" title="Nadpis 2">H2</button>
                     <button class="tool-btn" data-tool="highlight" title="Zvýraznění (==text==)"><mark style="background: rgba(255,208,0,0.3); color: inherit; padding: 0 2px;">H</mark></button>
                     <button class="tool-btn" data-tool="strike" title="Přeškrtnutí (~~text~~)"><s>S</s></button>
-                    <button class="tool-btn" data-tool="wikilink" title="Odkaz na poznámku ([[link]])">🔗 [[ ]]</button>
-                    <button class="tool-btn" data-tool="callout" title="Vložit callout">💡 Callout</button>
-                    <button class="tool-btn" data-tool="table" title="Vložit tabulku">📊 Tabulka</button>
+                    <button class="tool-btn" data-tool="wikilink" title="Odkaz na poznámku ([[link]])">[[ ]]</button>
+                    <button class="tool-btn" data-tool="callout" title="Vložit callout">Callout</button>
+                    <button class="tool-btn" data-tool="table" title="Vložit tabulku">Tabulka</button>
                     <button class="tool-btn" data-tool="hr" title="Dělící čára (---)">—</button>
-                    <button class="tool-btn" data-tool="task" title="Úkol (- [ ])">☑</button>
+                    <button class="tool-btn" data-tool="task" title="Úkol (- [ ])">Úkol</button>
 
                     <!-- Text Color Picker -->
                     <select id="tool-color-select" class="tool-select" title="Barva vybraného textu">
-                        <option value="">🎨 Barva textu...</option>
-                        <option value="#ff5555">🔴 Červená</option>
-                        <option value="#50fa7b">🟢 Zelená</option>
-                        <option value="#8be9fd">🔵 Azurová</option>
-                        <option value="#bd93f9">🟣 Fialová</option>
-                        <option value="#ffb86c">🟠 Oranžová</option>
-                        <option value="#f1fa8c">🟡 Žlutá</option>
+                        <option value="">Barva textu...</option>
+                        <option value="#ff5555">Červená</option>
+                        <option value="#50fa7b">Zelená</option>
+                        <option value="#8be9fd">Azurová</option>
+                        <option value="#bd93f9">Fialová</option>
+                        <option value="#ffb86c">Oranžová</option>
+                        <option value="#f1fa8c">Žlutá</option>
                     </select>
 
                     <!-- Native File Explorer Pickers -->
-                    <button id="btn-upload-image" class="tool-btn" title="Vložit obrázek z počítače">🖼️ Obrázek</button>
-                    <button id="btn-upload-audio" class="tool-btn" title="Vložit zvuk z počítače">🎵 Zvuk</button>
-                    <button id="btn-upload-file" class="tool-btn" title="Nahrát libovolný soubor z počítače">📁 Soubor</button>
+                    <button id="btn-upload-image" class="tool-btn" title="Vložit obrázek z počítače">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                        Obrázek
+                    </button>
+                    <button id="btn-upload-audio" class="tool-btn" title="Vložit zvuk z počítače">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+                        Zvuk
+                    </button>
+                    <button id="btn-upload-file" class="tool-btn" title="Nahrát libovolný soubor z počítače">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                        Příloha
+                    </button>
 
                     <!-- Hidden Native File Inputs -->
                     <input type="file" id="input-file-image" accept="image/*" style="display: none;">
@@ -1599,7 +1782,7 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
                 </div>
                 <div class="graph-header-controls">
                     <input type="text" id="graph-search" class="graph-search-input" placeholder="Hledat uzel...">
-                    <button id="graph-btn-fit" class="graph-ctrl-btn" title="Vystředit graf">🎯 Reset</button>
+                    <button id="graph-btn-fit" class="graph-ctrl-btn" title="Vystředit graf">Reset</button>
                     <button id="graph-btn-close" class="graph-close-btn" title="Zavřít">✕</button>
                 </div>
             </div>
@@ -1628,9 +1811,13 @@ $userMode = $_SESSION['mode'] ?? 'readonly';
         </div>
     </div>
 
-    <!-- Pass user mode to JS -->
+    <!-- Pass user info, vault, and CSRF token to JS -->
     <script>
+        window.CSRF_TOKEN = "<?php echo $_SESSION['csrf_token']; ?>";
+        window.CURRENT_VAULT = "<?php echo htmlspecialchars($activeVault, ENT_QUOTES, 'UTF-8'); ?>";
         window.USER_MODE = "<?php echo $userMode; ?>";
+        window.IS_ADMIN = <?php echo $isAdmin ? 'true' : 'false'; ?>;
+        window.USERNAME = "<?php echo htmlspecialchars($username, ENT_QUOTES, 'UTF-8'); ?>";
     </script>
     <script src="app.js?v=<?php echo time(); ?>"></script>
 </body>

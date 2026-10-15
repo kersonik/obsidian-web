@@ -1,6 +1,8 @@
 document.addEventListener('DOMContentLoaded', () => {
     const fileTreeContainer = document.getElementById('file-tree');
     const searchInput = document.getElementById('search-input');
+    const searchResultsContainer = document.getElementById('search-results');
+    const vaultSelect = document.getElementById('vault-select');
     const noteView = document.getElementById('note-view');
     const noteEditor = document.getElementById('note-editor');
     const emptyState = document.getElementById('empty-state');
@@ -39,8 +41,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const modalBtnCancel = document.getElementById('modal-btn-cancel');
     const modalBtnConfirm = document.getElementById('modal-btn-confirm');
 
-    const userMode = window.USER_MODE || 'readonly';
-    const isEditAllowed = (userMode === 'edit');
+    let currentVault = window.CURRENT_VAULT || 'default';
+    let userMode = window.USER_MODE || 'readonly';
+    let isEditAllowed = (userMode === 'edit');
 
     let allFilesData = [];
     let serverVaultPath = '';
@@ -48,6 +51,15 @@ document.addEventListener('DOMContentLoaded', () => {
     let rawNoteContent = '';
     let isEditingMode = false;
     let isUnsaved = false;
+    let currentFileLastModified = 0;
+
+    // Vault Selector Change Event
+    if (vaultSelect) {
+        vaultSelect.addEventListener('change', () => {
+            const newVault = vaultSelect.value;
+            window.location.href = `index.php?vault=${encodeURIComponent(newVault)}`;
+        });
+    }
 
     // Custom In-App Modal Dialog Prompts
     function showCustomPrompt(title, defaultValue = '', placeholder = '') {
@@ -182,9 +194,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Fetch file tree from server
     async function loadFileTree() {
         try {
-            const response = await fetch('file.php?action=list');
+            const response = await fetch(`file.php?action=list&vault=${encodeURIComponent(currentVault)}`);
             if (!response.ok) {
-                if (response.status === 403) {
+                if (response.status === 401 || response.status === 403) {
                     window.location.href = 'login.php';
                     return;
                 }
@@ -192,6 +204,17 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const data = await response.json();
+
+            if (data && data.vault) {
+                currentVault = data.vault;
+            }
+            if (data && data.csrfToken) {
+                window.CSRF_TOKEN = data.csrfToken;
+            }
+            if (data && data.permission) {
+                userMode = (data.permission === 'write') ? 'edit' : 'readonly';
+                isEditAllowed = (userMode === 'edit');
+            }
 
             if (Array.isArray(data)) {
                 allFilesData = data;
@@ -250,7 +273,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function getAllFolders(items, list = []) {
         items.forEach(item => {
             if (item.type === 'folder') {
-                list.push({ value: item.path, label: `📁 ${item.path}` });
+                list.push({ value: item.path, label: item.path });
                 if (item.children) {
                     getAllFolders(item.children, list);
                 }
@@ -285,6 +308,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 folderHeader.className = 'folder-header';
                 folderHeader.dataset.folderPath = item.path;
 
+                const folderKey = `${currentVault}:${item.path}`;
+                const collapsedMap = JSON.parse(localStorage.getItem('obsidian_collapsed_folders') || '{}');
+                const isCollapsed = Boolean(collapsedMap[folderKey]);
+
+                if (isCollapsed) {
+                    folderHeader.classList.add('collapsed');
+                }
+
                 if (isEditAllowed) {
                     folderHeader.setAttribute('draggable', 'true');
                     attachDragAndDropHandlers(folderHeader, item.path, true);
@@ -311,6 +342,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 folderHeader.innerHTML = `
                     <div class="folder-header-label">
+                        <span class="folder-chevron">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <polyline points="9 18 15 12 9 6"></polyline>
+                            </svg>
+                        </span>
                         <svg class="item-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
                         </svg>
@@ -321,12 +357,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 const folderContent = document.createElement('div');
                 folderContent.className = 'folder-content';
+                if (isCollapsed) {
+                    folderContent.classList.add('collapsed');
+                }
 
-                // Tapping folder label: Expands/collapses folder AND activates action buttons for mobile
+                // Tapping folder label: Expands/collapses folder, toggles chevron, persists to localStorage
                 folderHeader.querySelector('.folder-header-label').addEventListener('click', () => {
                     fileTreeContainer.querySelectorAll('.touch-selected').forEach(el => el.classList.remove('touch-selected'));
                     folderHeader.classList.add('touch-selected');
-                    folderContent.classList.toggle('collapsed');
+
+                    const nowCollapsed = folderContent.classList.toggle('collapsed');
+                    folderHeader.classList.toggle('collapsed', nowCollapsed);
+
+                    const map = JSON.parse(localStorage.getItem('obsidian_collapsed_folders') || '{}');
+                    if (nowCollapsed) {
+                        map[folderKey] = true;
+                    } else {
+                        delete map[folderKey];
+                    }
+                    localStorage.setItem('obsidian_collapsed_folders', JSON.stringify(map));
                 });
 
                 folderGroup.appendChild(folderHeader);
@@ -467,26 +516,115 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    // Search filter
+    // Fulltext search with debouncing
+    let searchDebounceTimeout = null;
+
     if (searchInput) {
         searchInput.addEventListener('input', (e) => {
-            const query = e.target.value.toLowerCase().trim();
-            const allItems = fileTreeContainer.querySelectorAll('.tree-item');
+            const query = e.target.value.trim();
+            if (searchDebounceTimeout) clearTimeout(searchDebounceTimeout);
 
-            allItems.forEach(item => {
-                const text = item.textContent.toLowerCase();
-                if (text.includes(query)) {
-                    item.style.display = 'flex';
-                    let parentContent = item.closest('.folder-content');
-                    while (parentContent) {
-                        parentContent.classList.remove('collapsed');
-                        parentContent = parentContent.parentElement.closest('.folder-content');
-                    }
-                } else {
-                    item.style.display = 'none';
+            if (!query) {
+                if (searchResultsContainer) {
+                    searchResultsContainer.style.display = 'none';
+                    searchResultsContainer.innerHTML = '';
                 }
-            });
+                fileTreeContainer.style.display = 'block';
+                return;
+            }
+
+            searchDebounceTimeout = setTimeout(async () => {
+                await executeSearch(query);
+            }, 250);
         });
+
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                searchInput.value = '';
+                if (searchResultsContainer) {
+                    searchResultsContainer.style.display = 'none';
+                    searchResultsContainer.innerHTML = '';
+                }
+                fileTreeContainer.style.display = 'block';
+            }
+        });
+    }
+
+    async function executeSearch(query) {
+        if (!searchResultsContainer) return;
+
+        fileTreeContainer.style.display = 'none';
+        searchResultsContainer.style.display = 'block';
+        searchResultsContainer.innerHTML = `
+            <div style="padding: 18px; text-align: center; color: var(--text-secondary); font-size: 0.84rem;">
+                Hledám "${escapeHtml(query)}"...
+            </div>`;
+
+        try {
+            const response = await fetch(`file.php?action=search&vault=${encodeURIComponent(currentVault)}&q=${encodeURIComponent(query)}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+
+            if (!data.results || data.results.length === 0) {
+                searchResultsContainer.innerHTML = `
+                    <div class="search-summary-badge">
+                        <span>Výsledky vyhledávání</span>
+                        <span>0 nalezeno</span>
+                    </div>
+                    <div style="padding: 24px 12px; text-align: center; color: var(--text-secondary); font-size: 0.84rem;">
+                        Žádné poznámky neodpovídají dotazu "${escapeHtml(query)}".
+                    </div>`;
+                return;
+            }
+
+            let html = `
+                <div class="search-summary-badge">
+                    <span>Nalezeno <strong>${data.results.length}</strong> výsledků</span>
+                    <span style="font-size: 0.72rem; opacity: 0.75;">${data.engine === 'ripgrep' ? 'ripgrep' : 'PHP'}</span>
+                </div>`;
+
+            data.results.forEach(res => {
+                const displayName = res.filename.replace(/\.md$/i, '');
+                const escapedSnippet = escapeHtml(res.snippet);
+                const reg = new RegExp('(' + escapeRegex(query) + ')', 'gi');
+                const highlightedSnippet = escapedSnippet.replace(reg, '<mark>$1</mark>');
+
+                html += `
+                    <div class="search-result-item" data-path="${escapeHtml(res.path)}">
+                        <div class="search-result-title">
+                            <svg class="item-icon" style="width: 14px; height: 14px;" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                                <polyline points="14 2 14 8 20 8"></polyline>
+                            </svg>
+                            <span>${escapeHtml(displayName)}</span>
+                        </div>
+                        <div class="search-result-path">${escapeHtml(res.path)}${res.line ? ` (řádek ${res.line})` : ''}</div>
+                        <div class="search-result-snippet">${highlightedSnippet}</div>
+                    </div>`;
+            });
+
+            searchResultsContainer.innerHTML = html;
+
+            searchResultsContainer.querySelectorAll('.search-result-item').forEach(item => {
+                item.addEventListener('click', () => {
+                    const path = item.dataset.path;
+                    if (sidebar.classList.contains('open')) {
+                        toggleSidebar();
+                    }
+                    selectFile(path);
+                });
+            });
+        } catch (err) {
+            console.error('Search error:', err);
+            searchResultsContainer.innerHTML = `
+                <div style="padding: 16px; color: #eb5757; font-size: 0.82rem; text-align: center;">
+                    Chyba při vyhledávání: ${escapeHtml(err.message)}
+                </div>`;
+        }
+    }
+
+    function escapeRegex(string) {
+        return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     }
 
     // Select and load note
@@ -498,10 +636,14 @@ document.addEventListener('DOMContentLoaded', () => {
         notePathSpan.textContent = filePath;
 
         try {
-            const response = await fetch(`file.php?f=${encodeURIComponent(filePath)}`);
+            const response = await fetch(`file.php?f=${encodeURIComponent(filePath)}&vault=${encodeURIComponent(currentVault)}`);
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
+
+            // Capture last_modified header for conflict detection
+            const mtimeHeader = response.headers.get('X-Last-Modified');
+            currentFileLastModified = mtimeHeader ? parseInt(mtimeHeader, 10) : 0;
 
             const isMarkdown = filePath.toLowerCase().endsWith('.md');
             if (isMarkdown) {
@@ -520,13 +662,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 emptyState.style.display = 'none';
             } else if (/\.(jpg|jpeg|png|gif|webp)$/i.test(filePath)) {
                 hideEditorAndPreview();
-                const imgUrl = `file.php?f=${encodeURIComponent(filePath)}`;
+                const imgUrl = `file.php?f=${encodeURIComponent(filePath)}&vault=${encodeURIComponent(currentVault)}`;
                 noteView.innerHTML = `<img src="${imgUrl}" alt="${escapeHtml(filePath)}" style="max-width: 100%; height: auto; border-radius: 8px;">`;
                 noteView.style.display = 'block';
                 emptyState.style.display = 'none';
             } else if (/\.(m4a|mp3|ogg|wav)$/i.test(filePath)) {
                 hideEditorAndPreview();
-                const audioUrl = `file.php?f=${encodeURIComponent(filePath)}`;
+                const audioUrl = `file.php?f=${encodeURIComponent(filePath)}&vault=${encodeURIComponent(currentVault)}`;
                 noteView.innerHTML = `<audio controls src="${audioUrl}" style="width: 100%; margin-top: 20px;"></audio>`;
                 noteView.style.display = 'block';
                 emptyState.style.display = 'none';
@@ -668,7 +810,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const targetPath = resolveNotePath(embedTarget);
             if (targetPath && targetPath !== currentFilePath) {
                 try {
-                    const resp = await fetch(`file.php?f=${encodeURIComponent(targetPath)}`);
+                    const resp = await fetch(`file.php?f=${encodeURIComponent(targetPath)}&vault=${encodeURIComponent(currentVault)}`);
                     if (resp.ok) {
                         const embedText = await resp.text();
                         el.innerHTML = parseObsidianMarkdown(embedText, targetPath);
@@ -760,16 +902,22 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // Save note via AJAX
-    async function saveCurrentNote() {
+    // Save note via AJAX with Conflict Detection
+    async function saveCurrentNote(force = false) {
         if (!isEditAllowed || !currentFilePath) return;
 
         updateSaveStatus('Ukládám...', true);
 
         const formData = new FormData();
         formData.append('action', 'save');
+        formData.append('vault', currentVault);
+        formData.append('csrf_token', window.CSRF_TOKEN || '');
         formData.append('f', currentFilePath);
         formData.append('content', rawNoteContent);
+        formData.append('last_modified', currentFileLastModified);
+        if (force) {
+            formData.append('force', '1');
+        }
 
         try {
             const response = await fetch('file.php?action=save', {
@@ -777,10 +925,37 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: formData
             });
 
+            if (response.status === 409) {
+                // Conflict detected!
+                const res = await response.json();
+                updateSaveStatus('Konflikt!', true);
+
+                const overwrite = await showCustomConfirm(
+                    'Konflikt při ukládání',
+                    'Soubor byl na serveru mezitím změněn jiným uživatelem nebo procesem.\nChcete své změny přesto uložit (přepsat verzi na serveru)?'
+                );
+
+                if (overwrite) {
+                    await saveCurrentNote(true);
+                } else {
+                    const reload = await showCustomConfirm(
+                        'Obnovit soubor ze serveru?',
+                        'Chcete načíst novou verzi ze serveru? (Vaše neuložené změny v editoru budou zahozeny)'
+                    );
+                    if (reload) {
+                        await selectFile(currentFilePath);
+                    }
+                }
+                return;
+            }
+
             const res = await response.json();
             if (res.success) {
                 isUnsaved = false;
-                updateSaveStatus('Uloženo ✔', false);
+                if (res.last_modified) {
+                    currentFileLastModified = res.last_modified;
+                }
+                updateSaveStatus('Uloženo', false);
             } else {
                 updateSaveStatus('Chyba uložení!', true);
                 alert(res.message || 'Nepodařilo se uložit soubor.');
@@ -844,6 +1019,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const formData = new FormData();
         formData.append('action', 'upload');
+        formData.append('vault', currentVault);
+        formData.append('csrf_token', window.CSRF_TOKEN || '');
         formData.append('file', file);
         formData.append('targetDir', targetDir);
 
@@ -987,7 +1164,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!isEditAllowed || !sourcePath) return;
 
         const options = [
-            { value: '', label: '📂 (Kořenový adresář Vaultu)' }
+            { value: '', label: '(Kořenový adresář Vaultu)' }
         ];
 
         getAllFolders(allFilesData, options);
@@ -1009,6 +1186,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const formData = new FormData();
         formData.append('action', 'move');
+        formData.append('vault', currentVault);
+        formData.append('csrf_token', window.CSRF_TOKEN || '');
         formData.append('sourcePath', sourcePath);
         formData.append('targetFolder', targetFolder);
 
@@ -1048,6 +1227,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const formData = new FormData();
         formData.append('action', 'create_file');
+        formData.append('vault', currentVault);
+        formData.append('csrf_token', window.CSRF_TOKEN || '');
         formData.append('name', name);
         formData.append('parent', parentFolder);
 
@@ -1079,6 +1260,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const formData = new FormData();
             formData.append('action', 'create_folder');
+            formData.append('vault', currentVault);
+            formData.append('csrf_token', window.CSRF_TOKEN || '');
             formData.append('name', name);
 
             try {
@@ -1108,6 +1291,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const formData = new FormData();
         formData.append('action', 'delete');
+        formData.append('vault', currentVault);
+        formData.append('csrf_token', window.CSRF_TOKEN || '');
         formData.append('path', itemPath);
 
         try {
@@ -1143,6 +1328,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const formData = new FormData();
         formData.append('action', 'rename');
+        formData.append('vault', currentVault);
+        formData.append('csrf_token', window.CSRF_TOKEN || '');
         formData.append('oldPath', oldPath);
         formData.append('newName', newName);
 
@@ -1316,14 +1503,32 @@ document.addEventListener('DOMContentLoaded', () => {
                     i++;
                 }
                 const calloutIcons = {
-                    'note': '📝', 'info': 'ℹ️', 'tip': '💡', 'hint': '💡', 'important': '❗',
-                    'warning': '⚠️', 'caution': '🔥', 'danger': '⛔', 'bug': '🐛',
-                    'example': '📋', 'quote': '💬', 'cite': '💬', 'question': '❓',
-                    'faq': '❓', 'success': '✅', 'check': '✅', 'done': '✅',
-                    'failure': '❌', 'fail': '❌', 'missing': '❌', 'abstract': '📄',
-                    'summary': '📄', 'tldr': '📄', 'todo': '📌'
+                    'note': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
+                    'info': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+                    'tip': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>',
+                    'hint': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>',
+                    'important': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>',
+                    'warning': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+                    'caution': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+                    'danger': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+                    'bug': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="8" height="14" x="8" y="6" rx="4"/><path d="m19 7-3 2"/><path d="m5 7 3 2"/><path d="m19 19-3-2"/><path d="m5 19 3-2"/><path d="M20 13h-4"/><path d="M4 13h4"/><path d="m10 4 1 2"/><path d="m14 4-1 2"/></svg>',
+                    'example': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>',
+                    'quote': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/></svg>',
+                    'cite': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/><path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z"/></svg>',
+                    'question': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+                    'faq': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+                    'success': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+                    'check': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+                    'done': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+                    'failure': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+                    'fail': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+                    'missing': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+                    'abstract': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>',
+                    'summary': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>',
+                    'tldr': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>',
+                    'todo': '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><polyline points="9 11 12 14 22 4"/></svg>'
                 };
-                const icon = calloutIcons[calloutType] || '📝';
+                const icon = calloutIcons[calloutType] || calloutIcons['note'];
                 const contentHtml = contentLines.map(l => `<p>${inlineFormat(escapeHtml(l), filePath)}</p>`).join('\n');
                 htmlBlocks.push(`<div class="callout callout-${escapeHtml(calloutType)}">
                     <div class="callout-title"><span class="callout-title-icon">${icon}</span> ${escapeHtml(calloutTitle)}</div>
@@ -1469,7 +1674,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 flushParagraph();
                 const alt = standardImgMatch[1];
                 const url = standardImgMatch[2];
-                const fileUrl = url.startsWith('http') ? url : `file.php?f=${encodeURIComponent(resolveEmbedPath(url, filePath))}`;
+                const fileUrl = url.startsWith('http') ? url : `file.php?f=${encodeURIComponent(resolveEmbedPath(url, filePath))}&vault=${encodeURIComponent(currentVault)}`;
                 htmlBlocks.push(`<img src="${fileUrl}" alt="${escapeHtml(alt)}" style="max-width: 100%; height: auto; border-radius: 8px;">`);
                 i++;
                 continue;
@@ -1514,7 +1719,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Standard markdown images ![alt](url)
         text = text.replace(/!\[(.*?)\]\((.*?)\)/g, (match, alt, url) => {
-            const fileUrl = url.startsWith('http') ? url : `file.php?f=${encodeURIComponent(resolveEmbedPath(url, currentFilePath))}`;
+            const fileUrl = url.startsWith('http') ? url : `file.php?f=${encodeURIComponent(resolveEmbedPath(url, currentFilePath))}&vault=${encodeURIComponent(currentVault)}`;
             return `<img src="${fileUrl}" alt="${escapeHtml(alt)}" style="max-width: 100%; height: auto; border-radius: 8px;">`;
         });
 
@@ -1632,7 +1837,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const resolvedPath = resolveEmbedPath(cleanName, currentFilePath);
-        const fileUrl = `file.php?f=${encodeURIComponent(resolvedPath)}`;
+        const fileUrl = `file.php?f=${encodeURIComponent(resolvedPath)}&vault=${encodeURIComponent(currentVault)}`;
         const ext = cleanName.split('.').pop().toLowerCase();
         const styleAttr = widthStyle ? `style="${widthStyle} height: auto; border-radius: 8px;"` : `style="max-width: 100%; height: auto; border-radius: 8px;"`;
 
@@ -1640,7 +1845,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (ext === 'md' || !cleanName.includes('.')) {
             const noteName = cleanName.replace(/\.md$/i, '');
             return `<div class="embedded-note">
-                <div class="embedded-note-title">📄 <a class="obsidian-wikilink" href="#" onclick="event.preventDefault(); window.openWikilink('${escapeHtml(noteName)}')">${escapeHtml(noteName)}</a></div>
+                <div class="embedded-note-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align: -2px; margin-right: 4px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><a class="obsidian-wikilink" href="#" onclick="event.preventDefault(); window.openWikilink('${escapeHtml(noteName)}')">${escapeHtml(noteName)}</a></div>
                 <div class="embedded-note-preview" data-embed-note="${escapeHtml(noteName)}"><em>Načítání vložené poznámky...</em></div>
             </div>`;
         }
@@ -1767,7 +1972,7 @@ document.addEventListener('DOMContentLoaded', () => {
         resizeGraphCanvas();
 
         try {
-            const resp = await fetch('file.php?action=graph_data');
+            const resp = await fetch(`file.php?action=graph_data&vault=${encodeURIComponent(currentVault)}`);
             if (!resp.ok) throw new Error('Nepodařilo se načíst data grafu.');
             const data = await resp.json();
 
